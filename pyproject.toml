@@ -1,0 +1,10 @@
+[project]
+name = "zbd"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "psycopg[binary]>=3.3.8",
+    "pymongo>=4.19.0",
+    "pymysql>=1.2.3",
+    "redis>=8.1.0",
+]
