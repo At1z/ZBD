@@ -1,5 +1,6 @@
 import pymysql
 
+import connections
 from dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
 
 BATCH_SIZE = 10_000
@@ -45,10 +46,6 @@ SCHEMA = [
 ]
 
 
-def connect():
-    return pymysql.connect(host="127.0.0.1", port=3306, user="root", password="admin", database="zbd")
-
-
 def insert_rows(conn, table, columns, rows):
     sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"
     batch = []
@@ -69,7 +66,7 @@ def inject(dataset):
         ("products", PRODUCT_COLUMNS, dataset.iter_products()),
         ("transactions", TRANSACTION_COLUMNS, dataset.iter_transactions()),
     ]
-    conn = connect()
+    conn = connections.mysql()
     try:
         with conn.cursor() as cur:
             for statement in SCHEMA:
@@ -86,7 +83,7 @@ def inject(dataset):
 def check(expected, quiet=False):
     """Health query: row counts plus a 3-table JOIN that must match every transaction."""
     try:
-        conn = connect()
+        conn = connections.mysql()
     except pymysql.MySQLError:
         return False
     try:

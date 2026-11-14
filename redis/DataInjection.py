@@ -2,6 +2,8 @@ from datetime import date
 
 import redis
 
+import connections
+
 BATCH_SIZE = 10_000
 
 # Key layout (Redis has no joins, so references are resolved by the client):
@@ -13,12 +15,8 @@ BATCH_SIZE = 10_000
 #   idx:product:category:{c}                           sets of product ids
 
 
-def connect():
-    return redis.Redis(host="localhost", port=6379, decode_responses=True)
-
-
 def inject(dataset):
-    r = connect()
+    r = connections.redis_client()
     r.flushdb()
 
     pipe = r.pipeline(transaction=False)
@@ -56,7 +54,7 @@ def inject(dataset):
 def check(expected, quiet=False):
     """Health query: key counts plus a manual join of one transaction with its customer and product."""
     try:
-        r = connect()
+        r = connections.redis_client()
         counts = {
             "customers": r.scard("ids:customers"),
             "products": r.scard("ids:products"),

@@ -1,14 +1,10 @@
 from datetime import datetime
 
-from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
+import connections
+
 BATCH_SIZE = 50_000
-URI = "mongodb://admin:admin@localhost:27017"
-
-
-def connect():
-    return MongoClient(URI, serverSelectionTimeoutMS=5000)["zbd"]
 
 
 def customer_doc(row):
@@ -57,7 +53,7 @@ def insert_docs(collection, docs):
 
 
 def inject(dataset):
-    db = connect()
+    db = connections.mongo()
     collections = [
         ("customers", (customer_doc(r) for r in dataset.iter_customers())),
         ("products", (product_doc(r) for r in dataset.iter_products())),
@@ -76,7 +72,7 @@ def check(expected, quiet=False):
     """Health query: document counts plus a $lookup on a sample of transactions."""
     sample_size = 1000
     try:
-        db = connect()
+        db = connections.mongo()
         counts = {name: db[name].count_documents({}) for name in expected}
         joined = next(db.transactions.aggregate([
             {"$limit": sample_size},

@@ -1,8 +1,7 @@
 import psycopg
 
+import connections
 from dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
-
-DSN = "host=localhost port=5432 dbname=zbd user=admin password=admin"
 
 SCHEMA = """
 DROP TABLE IF EXISTS transactions, products, customers CASCADE;
@@ -49,7 +48,7 @@ def inject(dataset):
         ("products", PRODUCT_COLUMNS, dataset.iter_products()),
         ("transactions", TRANSACTION_COLUMNS, dataset.iter_transactions()),
     ]
-    with psycopg.connect(DSN) as conn:
+    with connections.postgres() as conn:
         conn.execute(SCHEMA)
         for name, columns, rows in tables:
             with conn.cursor() as cur, cur.copy(f"COPY {name} ({', '.join(columns)}) FROM STDIN") as copy:
@@ -57,14 +56,14 @@ def inject(dataset):
                     copy.write_row([row[c] for c in columns])
             print(f"[postgres] {name} loaded")
         conn.execute(INDEXES)
-    with psycopg.connect(DSN, autocommit=True) as conn:
+    with connections.postgres(autocommit=True) as conn:
         conn.execute("ANALYZE")
 
 
 def check(expected, quiet=False):
     """Health query: row counts plus a 3-table JOIN that must match every transaction."""
     try:
-        with psycopg.connect(DSN) as conn:
+        with connections.postgres() as conn:
             counts = {t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in expected}
             joined = conn.execute(
                 "SELECT count(*) FROM transactions t "
