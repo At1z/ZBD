@@ -1,0 +1,127 @@
+import csv
+import urllib.request
+import zipfile
+from datetime import date
+from pathlib import Path
+
+ROOT = Path(__file__).parent
+DATA_DIR = ROOT / "data"
+KAGGLE_DIR = DATA_DIR / "kaggle"
+KAGGLE_URL = "https://www.kaggle.com/api/v1/datasets/download/noopurbhatt/retail-sales-dataset"
+SOURCE_CSV = KAGGLE_DIR / "retail_sales_dataset.csv"
+
+CUSTOMER_COLUMNS = ["customer_id", "customer_gender", "customer_age_group", "customer_segment"]
+PRODUCT_COLUMNS = ["product_id", "product_name", "category", "brand", "unit_price"]
+TRANSACTION_COLUMNS = [
+    "transaction_id", "transaction_date", "customer_id", "product_id", "quantity",
+    "discount_pct", "sales_amount", "payment_method", "sales_channel", "region",
+]
+
+
+class RetailDataset:
+    """Retail Sales Dataset (Kaggle) split into customers, products and transactions.
+
+    The source has 120 000 rows. transactions and customers are replicated `copies` times
+    (ids get the copy number as a prefix, so they stay unique), products stay a 120-row dictionary.
+    """
+
+    def __init__(self, copies=10, shift_years=0):
+        self.copies = copies
+        self.shift_years = shift_years  # shift transaction dates by N years per copy
+        self.customers = []
+        self.products = []
+        self.transactions = []
+
+    def download(self):
+        if SOURCE_CSV.exists():
+            return
+        KAGGLE_DIR.mkdir(parents=True, exist_ok=True)
+        archive = KAGGLE_DIR / "retail-sales-dataset.zip"
+        urllib.request.urlretrieve(KAGGLE_URL, archive)
+        with zipfile.ZipFile(archive) as z:
+            z.extract("retail_sales_dataset.csv", KAGGLE_DIR)
+        archive.unlink()
+        print(f"downloaded {SOURCE_CSV}")
+
+    def load(self):
+        """Read the source CSV and split it into the 3 tables (before replication)."""
+        self.download()
+        customers, products, transactions = {}, {}, []
+        with open(SOURCE_CSV, newline="") as f:
+            for row in csv.DictReader(f):
+                # the dataset is synthetic: one customer_id has different attributes in different rows,
+                # so the first occurrence wins
+                customers.setdefault(row["customer_id"], {c: row[c] for c in CUSTOMER_COLUMNS})
+                products.setdefault(row["product_id"], {c: row[c] for c in PRODUCT_COLUMNS})
+                transactions.append({c: row[c] for c in TRANSACTION_COLUMNS})
+        self.customers = list(customers.values())
+        self.products = list(products.values())
+        self.transactions = transactions
+        return self
+
+    def expected_counts(self):
+        """Row counts every database should hold after injection."""
+        if not self.transactions:
+            self.load()
+        return {
+            "customers": len(self.customers) * self.copies,
+            "products": len(self.products),
+            "transactions": len(self.transactions) * self.copies,
+        }
+
+    def _customer_id(self, customer_id, copy):
+        return f"C{copy}{customer_id[1:]}"
+
+    def _transaction_id(self, transaction_id, copy):
+        return f"T{copy}{transaction_id[1:]}"
+
+    def _shift_date(self, value, copy):
+        d = date.fromisoformat(value)
+        year = d.year + self.shift_years * copy
+        try:
+            return d.replace(year=year).isoformat()
+        except ValueError:  # 29 Feb in a non-leap year
+            return d.replace(year=year, day=28).isoformat()
+
+    def iter_customers(self):
+        for copy in range(self.copies):
+            for row in self.customers:
+                yield {**row, "customer_id": self._customer_id(row["customer_id"], copy)}
+
+    def iter_products(self):
+        yield from self.products
+
+    def iter_transactions(self):
+        for copy in range(self.copies):
+            for row in self.transactions:
+                yield {
+                    **row,
+                    "transaction_id": self._transaction_id(row["transaction_id"], copy),
+                    "customer_id": self._customer_id(row["customer_id"], copy),
+                    "transaction_date": self._shift_date(row["transaction_date"], copy),
+                }
+
+    def write_csv(self):
+        """Write customers.csv, products.csv and transactions.csv to data/."""
+        if not self.transactions:
+            self.load()
+        DATA_DIR.mkdir(exist_ok=True)
+        tables = {
+            "customers": (CUSTOMER_COLUMNS, self.iter_customers()),
+            "products": (PRODUCT_COLUMNS, self.iter_products()),
+            "transactions": (TRANSACTION_COLUMNS, self.iter_transactions()),
+        }
+        for name, (columns, rows) in tables.items():
+            path = DATA_DIR / f"{name}.csv"
+            count = 0
+            with open(path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(row)
+                    count += 1
+            print(f"{path.name}: {count} rows")
+
+
+if __name__ == "__main__":
+    RetailDataset().write_csv()

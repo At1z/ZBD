@@ -10,6 +10,8 @@ ZBD/
 ├── pyproject.toml     # dependencies (uv)
 ├── uv.lock            # pinned dependency versions (commit it)
 ├── docker_utils.py    # shared helper that starts a container
+├── dataset.py         # RetailDataset: downloads, splits into 3 tables, replicates x10
+├── data/              # generated CSVs + Kaggle source (git-ignored)
 ├── postgres/
 │   ├── initDB.py          # starts the container
 │   ├── DataInjection.py   # data insertion (empty for now)
@@ -68,10 +70,30 @@ docker logs zbd-postgres
 
 Note: containers created before health checks were added have none. Recreate them with the `docker rm -f` command above and run `uv run main.py` again.
 
+## Dataset
+
+[Retail Sales Dataset (Kaggle)](https://www.kaggle.com/datasets/noopurbhatt/retail-sales-dataset): 120 000 rows, 17 columns. `dataset.py` (class `RetailDataset`) downloads it, splits it into 3 tables and replicates it 10 times, so we get ~1.2M transactions:
+
+```
+uv run dataset.py     # writes data/customers.csv, data/products.csv, data/transactions.csv
+```
+
+| Table          | Rows (x10)  | Columns |
+|----------------|-------------|---------|
+| `customers`    | 247 840     | `customer_id` (PK), `customer_gender`, `customer_age_group`, `customer_segment` |
+| `products`     | 120         | `product_id` (PK), `product_name`, `category`, `brand`, `unit_price` |
+| `transactions` | 1 200 000   | `transaction_id` (PK), `transaction_date`, `customer_id` (FK), `product_id` (FK), `quantity`, `discount_pct`, `sales_amount`, `payment_method`, `sales_channel`, `region` |
+
+- `transactions` and `customers` are copied 10 times; ids get the copy number as a prefix (`T00000001`, `T10000001`, ...), so they stay unique and every copy keeps its own customers.
+- `products` is a dictionary and stays at 120 rows (not replicated).
+- The source is synthetic: one `customer_id` appears with different gender/age/segment in different rows. `customers` keeps the first occurrence.
+- `RetailDataset(copies=10, shift_years=0)`: `shift_years` can shift transaction dates per copy.
+- `data/` and `*.csv` are in `.gitignore`.
+
 ## Files in each database folder
 
 - `initDB.py` – database initialization (currently: starts the container)
-- `DataInjection.py` – data injection (to do)
+- `DataInjection.py` – loads the 3 tables from `RetailDataset` into this database (to do)
 - `Query.py` – queries (to do)
 
 ## Resources
