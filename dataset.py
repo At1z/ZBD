@@ -21,12 +21,14 @@ TRANSACTION_COLUMNS = [
 class RetailDataset:
     """Retail Sales Dataset (Kaggle) split into customers, products and transactions.
 
-    The source has 120 000 rows. transactions and customers are replicated `copies` times
-    (ids get the copy number as a prefix, so they stay unique), products stay a 120-row dictionary.
+    The source has 120 000 rows. `size` is the number of transactions to produce: the source is
+    replicated as many times as needed (ids get the copy number as a prefix, so they stay unique),
+    the last copy may be partial. customers only contains customers referenced by the produced
+    transactions, products stay a 120-row dictionary.
     """
 
-    def __init__(self, copies=10, shift_years=0):
-        self.copies = copies
+    def __init__(self, size=1_200_000, shift_years=0):
+        self.size = size
         self.shift_years = shift_years  # shift transaction dates by N years per copy
         self.customers = []
         self.products = []
@@ -64,10 +66,31 @@ class RetailDataset:
         if not self.transactions:
             self.load()
         return {
-            "customers": len(self.customers) * self.copies,
+            "customers": sum(self._customer_count(rows) for _, rows in self._plan()),
             "products": len(self.products),
-            "transactions": len(self.transactions) * self.copies,
+            "transactions": self.size,
         }
+
+    def _plan(self):
+        """(copy number, number of source rows used) for every copy needed to reach `size`."""
+        if not self.transactions:
+            self.load()
+        full, rest = divmod(self.size, len(self.transactions))
+        plan = [(copy, len(self.transactions)) for copy in range(full)]
+        if rest:
+            plan.append((full, rest))
+        return plan
+
+    def _customer_count(self, rows):
+        # self.customers is in order of first appearance, so the customers of the first `rows`
+        # transactions are a prefix of it
+        if rows == len(self.transactions):
+            return len(self.customers)
+        return len({t["customer_id"] for t in self.transactions[:rows]})
+
+    def transaction_ids(self, every):
+        """Ids of every `every`-th transaction (used by the UPDATE step of the benchmark)."""
+        return [row["transaction_id"] for i, row in enumerate(self.iter_transactions()) if i % every == 0]
 
     def _customer_id(self, customer_id, copy):
         return f"C{copy}{customer_id[1:]}"
@@ -84,16 +107,16 @@ class RetailDataset:
             return d.replace(year=year, day=28).isoformat()
 
     def iter_customers(self):
-        for copy in range(self.copies):
-            for row in self.customers:
+        for copy, rows in self._plan():
+            for row in self.customers[:self._customer_count(rows)]:
                 yield {**row, "customer_id": self._customer_id(row["customer_id"], copy)}
 
     def iter_products(self):
         yield from self.products
 
     def iter_transactions(self):
-        for copy in range(self.copies):
-            for row in self.transactions:
+        for copy, rows in self._plan():
+            for row in self.transactions[:rows]:
                 yield {
                     **row,
                     "transaction_id": self._transaction_id(row["transaction_id"], copy),

@@ -32,12 +32,14 @@ uv run main.py
 
 Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `redis`. Add more with `uv add <package>`.
 
-| Database   | Container    | Port  | Login / password |
-|------------|--------------|-------|------------------|
-| PostgreSQL | zbd-postgres | 5432  | admin / admin    |
-| MySQL      | zbd-mysql    | 3306  | root / admin     |
-| MongoDB    | zbd-mongodb  | 27017 | admin / admin    |
-| Redis      | zbd-redis    | 6379  | none             |
+| Database   | Image (pinned)      | Container    | Port  | Login / password |
+|------------|---------------------|--------------|-------|------------------|
+| PostgreSQL | `postgres:18.7`     | zbd-postgres | 5432  | admin / admin    |
+| MySQL      | `mysql:9.7.4`       | zbd-mysql    | 3306  | root / admin     |
+| MongoDB    | `mongo:9.0.8`       | zbd-mongodb  | 27017 | admin / admin    |
+| Redis      | `redis:8.10.3`      | zbd-redis    | 6379  | none             |
+
+Exact versions are pinned on purpose, so benchmark results stay comparable over time. After changing a version, remove the old container (`docker rm -f ...` below), otherwise the old image keeps running.
 
 Running it again is safe: existing containers are restarted, not recreated.
 To remove the containers: `docker rm -f zbd-postgres zbd-mysql zbd-mongodb zbd-redis`.
@@ -87,14 +89,47 @@ uv run dataset.py     # writes data/customers.csv, data/products.csv, data/trans
 - `transactions` and `customers` are copied 10 times; ids get the copy number as a prefix (`T00000001`, `T10000001`, ...), so they stay unique and every copy keeps its own customers.
 - `products` is a dictionary and stays at 120 rows (not replicated).
 - The source is synthetic: one `customer_id` appears with different gender/age/segment in different rows. `customers` keeps the first occurrence.
-- `RetailDataset(copies=10, shift_years=0)`: `shift_years` can shift transaction dates per copy.
+- `RetailDataset(size=1_200_000, shift_years=0)`: `size` is the number of transactions (10 000, 100 000, 1 000 000, ...). The source is replicated as many times as needed and `customers` only holds customers referenced by those transactions. `shift_years` can shift transaction dates per copy.
 - `data/` and `*.csv` are in `.gitignore`.
+
+## CRUD benchmark
+
+Every database goes through the same steps (`uv run benchmark.py --sizes 10000 100000 1000000`):
+
+| Step   | What happens | File |
+|--------|--------------|------|
+| CREATE | load N transactions (+ their customers and the 120 products), timed | `DataInjection.py` → `inject()` |
+| READ   | 3 queries: **simple** (1 table), **medium** (2 tables), **heavy** (3 tables) | `Query.py` → `simple()`, `medium()`, `heavy()` |
+| UPDATE | `quantity + 1` on every 100th transaction | `Query.py` → `update(ids)` |
+| DELETE | delete everything | `Query.py` → `delete_all()` |
+
+The queries are the same everywhere (SQL / `$lookup` / client-side join in Redis):
+
+| Query  | Tables | What it computes |
+|--------|--------|------------------|
+| simple | `transactions` | count and revenue per region for the `Online` channel |
+| medium | `transactions` + `products` | count and revenue per product category |
+| heavy  | `transactions` + `customers` + `products` | revenue per segment, category and region since 2025-01-01, groups above 1000, top 20 |
+
+Running operations on a chosen number of rows (`--sizes` = number of transactions; the steps share the same data, so use the same size in every call):
+
+```
+uv run benchmark.py --sizes 10000                          # full CRUD cycle on 10 000
+uv run benchmark.py --sizes 100000 --steps create          # only load 100 000
+uv run benchmark.py --sizes 100000 --steps read --repeat 3 # only the 3 queries, best of 3
+uv run benchmark.py --sizes 100000 --steps update          # only update every 100th
+uv run benchmark.py --sizes 100000 --steps delete          # only delete everything
+uv run benchmark.py --sizes 10000 100000 1000000           # whole cycle for three sizes in a row
+uv run benchmark.py --sizes 100000 --dbs postgres mongodb  # only some databases
+```
+
+Options: `--dbs postgres mongodb` (subset), `--update-every 100`, `--repeat 3` (best of N for queries). Results are printed and appended to `results/benchmark.csv`. The benchmark also compares query results between databases and prints a warning if they differ. Note: it wipes the data in the databases (DELETE step), run `uv run main.py` afterwards to load the full dataset again.
 
 ## Files in each database folder
 
 - `initDB.py` – database initialization (currently: starts the container)
-- `DataInjection.py` – loads the 3 tables from `RetailDataset` into this database (to do)
-- `Query.py` – queries (to do)
+- `DataInjection.py` – CREATE: loads the 3 tables from `RetailDataset`, plus `check()` (health query)
+- `Query.py` – READ, UPDATE and DELETE: `simple()`, `medium()`, `heavy()`, `update(ids)` (`quantity + 1`), `delete_all()` (Redis: `FLUSHDB`)
 
 ## Resources
 
