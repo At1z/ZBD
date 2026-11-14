@@ -32,12 +32,14 @@ uv run main.py
 
 Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `redis`. Add more with `uv add <package>`.
 
-| Database   | Container    | Port  | Login / password |
-|------------|--------------|-------|------------------|
-| PostgreSQL | zbd-postgres | 5432  | admin / admin    |
-| MySQL      | zbd-mysql    | 3306  | root / admin     |
-| MongoDB    | zbd-mongodb  | 27017 | admin / admin    |
-| Redis      | zbd-redis    | 6379  | none             |
+| Database   | Image (pinned)      | Container    | Port  | Login / password |
+|------------|---------------------|--------------|-------|------------------|
+| PostgreSQL | `postgres:18.7`     | zbd-postgres | 5432  | admin / admin    |
+| MySQL      | `mysql:9.7.4`       | zbd-mysql    | 3306  | root / admin     |
+| MongoDB    | `mongo:9.0.8`       | zbd-mongodb  | 27017 | admin / admin    |
+| Redis      | `redis:8.10.3`      | zbd-redis    | 6379  | none             |
+
+Exact versions are pinned on purpose, so benchmark results stay comparable over time. After changing a version, remove the old container (`docker rm -f ...` below), otherwise the old image keeps running.
 
 Running it again is safe: existing containers are restarted, not recreated.
 To remove the containers: `docker rm -f zbd-postgres zbd-mysql zbd-mongodb zbd-redis`.
