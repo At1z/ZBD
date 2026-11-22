@@ -10,6 +10,7 @@ ZBD/
 ├── benchmark.py       # runs the 24 scenarios on every database (runs, timeouts, CSV)
 ├── scenarios.py       # the 24 scenarios and their shared parameters
 ├── SCENARIOS.md       # description of every scenario (generated)
+├── report.py          # tables and charts from results/runs.csv
 ├── connections.py     # connection factories shared by all databases
 ├── pyproject.toml     # dependencies (uv)
 ├── uv.lock            # pinned dependency versions (commit it)
@@ -119,6 +120,15 @@ uv run scenarios.py --size 1000000                       # show the parameters t
 - Results are appended to `results/runs.csv` (`size, run, database, scenario, operation, difficulty, seconds, rows, status, digest`). Finished (database, size, run) triples are skipped, so an interrupted benchmark can be started again with the same arguments.
 - Ids, filters and new rows are derived from the data (`Params` in `scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.
 - Each `Query.py` has to provide `connect()`, `disconnect(ctx)` and `SCENARIOS = {"S02": fn, ..., "S24": fn}` (S01 is `DataInjection.inject`). Note: the benchmark wipes the data in the databases, run `uv run main.py` afterwards to load the full dataset again.
+
+## Report
+
+```
+uv run report.py                          # results/runs.csv -> results/report/report.md + PNG charts
+uv run report.py --csv other.csv --out some/dir
+```
+
+`results/report/report.md` contains: one table per database (rows CREATE / READ / UPDATE / DELETE / SUM, columns: every size x runs 1..3 + the best run), one comparison per size (best run of every database, then all 24 scenarios), an appendix with every scenario in every run, and the charts (per database: sizes compared; per size: databases compared; per size: all 24 scenarios; log scale). "Best run" is the complete run with the smallest total; a scenario that failed is shown as its status (`timeout`, `oom`, `error`, `skipped`) and as a cross on the charts, never as a zero. Colors follow the entity (one fixed color per database).
 
 ## Files in each database folder
 
