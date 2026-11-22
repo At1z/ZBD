@@ -77,15 +77,27 @@ def heavy():
 UPDATE_BATCH_SIZE = 10_000
 
 
+# HINCRBY would create a missing hash, so increment only when the transaction exists
+INCREMENT_IF_EXISTS = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    redis.call('HINCRBY', KEYS[1], 'quantity', 1)
+    return 1
+end
+return 0
+"""
+
+
 def update(ids):
-    """UPDATE: quantity + 1 for the given transaction ids. Returns the number of updated hashes."""
+    """UPDATE: quantity + 1 for the given transaction ids. Returns the number of updated hashes
+    (ids that do not exist are skipped, not created)."""
     r = connections.redis_client()
+    increment = r.register_script(INCREMENT_IF_EXISTS)
     updated = 0
     for i in range(0, len(ids), UPDATE_BATCH_SIZE):
         pipe = r.pipeline(transaction=False)
         for tid in ids[i:i + UPDATE_BATCH_SIZE]:
-            pipe.hincrby(f"transaction:{tid}", "quantity", 1)
-        updated += len(pipe.execute())
+            increment(keys=[f"transaction:{tid}"], client=pipe)
+        updated += sum(pipe.execute())
     return updated
 
 

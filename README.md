@@ -6,7 +6,9 @@ A project for working with four databases, each running in its own Docker contai
 
 ```
 ZBD/
-├── main.py            # runs initDB for every database
+├── main.py            # runs initDB for every database and loads the dataset
+├── benchmark.py       # CRUD benchmark across all databases
+├── connections.py     # connection factories shared by all databases
 ├── pyproject.toml     # dependencies (uv)
 ├── uv.lock            # pinned dependency versions (commit it)
 ├── docker_utils.py    # shared helper that starts a container
@@ -14,8 +16,8 @@ ZBD/
 ├── data/              # generated CSVs + Kaggle source (git-ignored)
 ├── postgres/
 │   ├── initDB.py          # starts the container
-│   ├── DataInjection.py   # data insertion (empty for now)
-│   └── Query.py           # queries (empty for now)
+│   ├── DataInjection.py   # CREATE: schema + data insertion, check() health query
+│   └── Query.py           # READ / UPDATE / DELETE: simple(), medium(), heavy(), update(), delete_all()
 ├── mysql/      (same files)
 ├── mongodb/    (same files)
 └── redis/      (same files)
@@ -23,7 +25,7 @@ ZBD/
 
 ## Usage
 
-Requires Docker (running) and [uv](https://docs.astral.sh/uv/) (`brew install uv`).
+Requires Docker (running) and [uv](https://docs.astral.sh/uv/) (see the uv docs for installation).
 
 ```
 uv sync          # first time only: creates .venv and installs the drivers
@@ -100,8 +102,8 @@ Every database goes through the same steps (`uv run benchmark.py --sizes 10000 1
 |--------|--------------|------|
 | CREATE | load N transactions (+ their customers and the 120 products), timed | `DataInjection.py` → `inject()` |
 | READ   | 3 queries: **simple** (1 table), **medium** (2 tables), **heavy** (3 tables) | `Query.py` → `simple()`, `medium()`, `heavy()` |
-| UPDATE | `quantity + 1` on every 100th transaction | `Query.py` → `update(ids)` |
-| DELETE | delete everything | `Query.py` → `delete_all()` |
+| UPDATE | `quantity + 1` on every 100th transaction (returns the number of rows really changed; in Redis only existing hashes are touched) | `Query.py` → `update(ids)` |
+| DELETE | delete everything (SQL / Mongo: `DELETE`; Redis: `FLUSHDB`, so its time is not directly comparable) | `Query.py` → `delete_all()` |
 
 The queries are the same everywhere (SQL / `$lookup` / client-side join in Redis):
 
