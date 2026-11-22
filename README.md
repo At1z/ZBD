@@ -6,31 +6,39 @@ A project for working with four databases, each running in its own Docker contai
 
 ```
 ZBD/
-├── main.py            # runs initDB for every database
+├── main.py            # starts every container and loads the full dataset
+├── benchmark.py       # runs the 24 scenarios on every database (runs, timeouts, CSV)
+├── report.py          # tables and charts from results/runs.csv
 ├── pyproject.toml     # dependencies (uv)
 ├── uv.lock            # pinned dependency versions (commit it)
-├── docker_utils.py    # shared helper that starts a container
-├── dataset.py         # RetailDataset: downloads, splits into 3 tables, replicates x10
-├── data/              # generated CSVs + Kaggle source (git-ignored)
-├── postgres/
-│   ├── initDB.py          # starts the container
-│   ├── DataInjection.py   # data insertion (empty for now)
-│   └── Query.py           # queries (empty for now)
-├── mysql/      (same files)
-├── mongodb/    (same files)
-└── redis/      (same files)
+├── SCENARIOS.md       # description of every scenario (generated)
+├── zbd/               # shared code (package)
+│   ├── connections.py     # connection factories shared by all databases
+│   ├── docker.py          # starts / stops containers (limits, engine settings, health checks)
+│   ├── dataset.py         # RetailDataset: downloads, splits into 3 tables, replicates
+│   └── scenarios.py       # the 24 scenarios and their shared parameters
+├── databases/
+│   ├── postgres/
+│   │   ├── initDB.py          # starts the container
+│   │   ├── DataInjection.py   # CREATE (S01): schema + data insertion, check() health query
+│   │   └── Query.py           # scenarios S02..S24
+│   ├── mysql/      (same files)
+│   ├── mongodb/    (same files)
+│   └── redis/      (same files)
+├── data/              # Kaggle source and generated CSVs (git-ignored)
+└── results/           # runs.csv (git-ignored) and report/ (tables, charts)
 ```
 
 ## Usage
 
-Requires Docker (running) and [uv](https://docs.astral.sh/uv/) (`brew install uv`).
+Requires Docker (running) and [uv](https://docs.astral.sh/uv/) (see the uv docs for installation).
 
 ```
 uv sync          # first time only: creates .venv and installs the drivers
 uv run main.py
 ```
 
-Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `redis`. Add more with `uv add <package>`.
+Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `redis`, `hiredis` (C parser for the Redis client, picked up automatically; speeds up reading millions of small replies). Add more with `uv add <package>`.
 
 | Database   | Image (pinned)      | Container    | Port  | Login / password |
 |------------|---------------------|--------------|-------|------------------|
@@ -40,6 +48,10 @@ Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `re
 | Redis      | `redis:8.10.3`      | zbd-redis    | 6379  | none             |
 
 Exact versions are pinned on purpose, so benchmark results stay comparable over time. After changing a version, remove the old container (`docker rm -f ...` below), otherwise the old image keeps running.
+
+Every container has the same hard limits (see `MEMORY_LIMIT` and `CPU_LIMIT` in `zbd/docker.py`): **6 GB RAM** (`--memory=6g --memory-swap=6g`) and **4 CPUs** (`--cpus=4`). Equal limits keep the comparison fair (no database wins just by using more cores, e.g. PostgreSQL's parallel scans), and a database that runs out of memory (e.g. Redis with 10M transactions) is stopped by Docker instead of freezing the machine. Redis additionally runs with `maxmemory 5gb` and `noeviction`: when full, writes fail with an error instead of the container being killed. Snapshots and the append-only file are off (`--save "" --appendonly no`): a snapshot forks the server and every page it then changes is copied, which at 10M transactions pushed the container over the 6 GB limit and the kernel killed Redis; so Redis is measured as a pure in-memory store (no durability), unlike PostgreSQL and MySQL. The engines also get comparable cache settings (`COMMANDS` in `zbd/docker.py`): MySQL `innodb_buffer_pool_size=3G` (the default 128 MB made 10M-row JOINs ~140x slower than at 1M, because the data no longer fit in memory), PostgreSQL `shared_buffers=1536MB` + `effective_cache_size=4GB`; MongoDB (WiredTiger takes ~50% of the container by default) and Redis (`maxmemory`) are left as they are.
+
+The limits and settings are applied when a container is created: containers created earlier have other ones: `uv run main.py` warns about them and `benchmark.py` refuses to measure (`--allow-wrong-limits` overrides), recreate them with the `docker rm -f` command below. **Results measured under different limits or settings must not be mixed in one `runs.csv`.**
 
 Running it again is safe: existing containers are restarted, not recreated.
 To remove the containers: `docker rm -f zbd-postgres zbd-mysql zbd-mongodb zbd-redis`.
@@ -74,10 +86,10 @@ Note: containers created before health checks were added have none. Recreate the
 
 ## Dataset
 
-[Retail Sales Dataset (Kaggle)](https://www.kaggle.com/datasets/noopurbhatt/retail-sales-dataset): 120 000 rows, 17 columns. `dataset.py` (class `RetailDataset`) downloads it, splits it into 3 tables and replicates it 10 times, so we get ~1.2M transactions:
+[Retail Sales Dataset (Kaggle)](https://www.kaggle.com/datasets/noopurbhatt/retail-sales-dataset): 120 000 rows, 17 columns. `zbd/dataset.py` (class `RetailDataset`) downloads it, splits it into 3 tables and replicates it 10 times, so we get ~1.2M transactions:
 
 ```
-uv run dataset.py     # writes data/customers.csv, data/products.csv, data/transactions.csv
+uv run python -m zbd.dataset     # writes data/customers.csv, data/products.csv, data/transactions.csv
 ```
 
 | Table          | Rows (x10)  | Columns |
@@ -92,44 +104,49 @@ uv run dataset.py     # writes data/customers.csv, data/products.csv, data/trans
 - `RetailDataset(size=1_200_000, shift_years=0)`: `size` is the number of transactions (10 000, 100 000, 1 000 000, ...). The source is replicated as many times as needed and `customers` only holds customers referenced by those transactions. `shift_years` can shift transaction dates per copy.
 - `data/` and `*.csv` are in `.gitignore`.
 
-## CRUD benchmark
+## Benchmark
 
-Every database goes through the same steps (`uv run benchmark.py --sizes 10000 100000 1000000`):
+24 scenarios (8 easy, 8 medium, 8 heavy; 3 CREATE, 14 READ, 3 UPDATE, 4 DELETE), identical for every database. The full list with the query of each scenario is in [SCENARIOS.md](SCENARIOS.md) (generated from `zbd/scenarios.py`: `uv run python -m zbd.scenarios --markdown`).
 
-| Step   | What happens | File |
-|--------|--------------|------|
-| CREATE | load N transactions (+ their customers and the 120 products), timed | `DataInjection.py` → `inject()` |
-| READ   | 3 queries: **simple** (1 table), **medium** (2 tables), **heavy** (3 tables) | `Query.py` → `simple()`, `medium()`, `heavy()` |
-| UPDATE | `quantity + 1` on every 100th transaction | `Query.py` → `update(ids)` |
-| DELETE | delete everything | `Query.py` → `delete_all()` |
-
-The queries are the same everywhere (SQL / `$lookup` / client-side join in Redis):
-
-| Query  | Tables | What it computes |
-|--------|--------|------------------|
-| simple | `transactions` | count and revenue per region for the `Online` channel |
-| medium | `transactions` + `products` | count and revenue per product category |
-| heavy  | `transactions` + `customers` + `products` | revenue per segment, category and region since 2025-01-01, groups above 1000, top 20 |
-
-Running operations on a chosen number of rows (`--sizes` = number of transactions; the steps share the same data, so use the same size in every call):
+One **run** = S01..S24 in a fixed order on one database (S01 loads the data, S24 deletes it). Every size is repeated 3 times, so 3 sizes x 3 runs = 9 runs per database:
 
 ```
-uv run benchmark.py --sizes 10000                          # full CRUD cycle on 10 000
-uv run benchmark.py --sizes 100000 --steps create          # only load 100 000
-uv run benchmark.py --sizes 100000 --steps read --repeat 3 # only the 3 queries, best of 3
-uv run benchmark.py --sizes 100000 --steps update          # only update every 100th
-uv run benchmark.py --sizes 100000 --steps delete          # only delete everything
-uv run benchmark.py --sizes 10000 100000 1000000           # whole cycle for three sizes in a row
-uv run benchmark.py --sizes 100000 --dbs postgres mongodb  # only some databases
+uv run benchmark.py                                      # sizes 100000 1000000 10000000, 3 runs each
+uv run benchmark.py --sizes 100000 --runs 1              # quick check
+uv run benchmark.py --sizes 100000 --dbs postgres mongodb
+uv run benchmark.py --timeout 600 --load-timeout 3600    # seconds per scenario / for the bulk load
+uv run benchmark.py --no-isolate                         # keep all containers running (default: only the measured one)
+uv run benchmark.py --pause 30                           # seconds of rest between databases (default 60, 0 = none)
+uv run benchmark.py --client-memory-gb 2                 # kill a scenario whose Python process exceeds 2 GB (default 3)
+uv run python -m zbd.scenarios --size 1000000           # show the parameters the scenarios use
 ```
 
-Options: `--dbs postgres mongodb` (subset), `--update-every 100`, `--repeat 3` (best of N for queries). Results are printed and appended to `results/benchmark.csv`. The benchmark also compares query results between databases and prints a warning if they differ. Note: it wipes the data in the databases (DELETE step), run `uv run main.py` afterwards to load the full dataset again.
+- Databases are measured one after another, never in parallel, with a pause (`--pause`, default 60 s) before each run that follows another database's run. While one database is measured, the containers of the others are stopped (frees RAM for 10M rows, adds a few seconds per run and database) and all are started again at the end; `--no-isolate` turns this off.
+- Every scenario runs in its own process: a scenario that takes longer than `--timeout` is recorded as `timeout`, one whose Python process exceeds `--client-memory-gb` or that is killed by the system as `oom`, an exception as `error`. A failed READ does not stop the run; a failed CREATE / UPDATE / DELETE makes the rest of the run `skipped`, because later results would not be comparable.
+- Results are appended to `results/runs.csv` (`size, run, database, scenario, operation, difficulty, seconds, rows, status, digest`). Finished (database, size, run) triples are skipped, so an interrupted benchmark can be started again with the same arguments.
+- Ids, filters and new rows are derived from the data (`Params` in `zbd/scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.
+- Each `Query.py` has to provide `connect()`, `disconnect(ctx)` and `SCENARIOS = {"S02": fn, ..., "S24": fn}` (S01 is `DataInjection.inject`). Note: the benchmark wipes the data in the databases, run `uv run main.py` afterwards to load the full dataset again.
+
+## Report
+
+```
+uv run report.py                          # results/runs.csv -> results/report/report.md + PNG charts
+uv run report.py --csv other.csv --out some/dir
+```
+
+`results/report/report.md` contains: one table per database (rows CREATE / READ / UPDATE / DELETE / SUM, columns: every size x runs 1..3 + the best run), one comparison per size (best run of every database, then all 24 scenarios), an appendix with every scenario in every run, and the charts (per database: sizes compared; per size: databases compared; per size: all 24 scenarios; log scale). "Best run" is the complete run with the smallest total; a scenario that failed is shown as its status (`timeout`, `oom`, `error`, `skipped`) and as a cross on the charts, never as a zero. Colors follow the entity (one fixed color per database).
 
 ## Files in each database folder
 
-- `initDB.py` – database initialization (currently: starts the container)
-- `DataInjection.py` – CREATE: loads the 3 tables from `RetailDataset`, plus `check()` (health query)
-- `Query.py` – READ, UPDATE and DELETE: `simple()`, `medium()`, `heavy()`, `update(ids)` (`quantity + 1`), `delete_all()` (Redis: `FLUSHDB`)
+- `initDB.py` – database initialization (starts the container)
+- `DataInjection.py` – CREATE (scenario S01): schema, bulk load of the 3 tables from `RetailDataset`, indexes, plus `check()` (health query)
+- `Query.py` – scenarios S02..S24 (`SCENARIOS`, `connect()`, `disconnect()`), see [SCENARIOS.md](SCENARIOS.md)
+
+Indexes: only the ones some scenario uses (transaction date, customer; Redis also the `Online` channel set). There is no `product_id` or `region` index in any database; the only exception is MySQL, where InnoDB creates an index for the `product_id` foreign key automatically.
+
+MongoDB uses an embedded model: every transaction document carries the customer (segment, age group) and product (category, name) fields the scenarios need, so its queries need no `$lookup`; `customers` and `products` are still loaded as collections. The price shows in S01 (bigger documents) and in S10 / S11 (the fields to embed are read before inserting). The results are identical to the other databases (checked by the benchmark), only the data model differs. The three heavy scenarios (S08, S17, S23) force a scan of the whole collection (`hint {$natural: 1}`): with the date index, MongoDB read the matching documents in date order, i.e. at random positions in the collection, which at 10M documents no longer fits in the cache (78 s instead of a few seconds).
+
+Redis has no joins or aggregation commands, so scenarios with joins / grouping (S03, S05, S06, S08, S09, S16, S17, S22, S23) use a Lua script that runs inside the server (`AGGREGATE` in `databases/redis/Query.py`): the client reads the transaction ids page by page (by rank in the date index, or with SSCAN), the script reads the hashes of the page, looks up customers / products and returns the partial groups, and the client merges the pages. Only ids go to the server and a few group rows come back, so client memory stays flat whatever the size. Aggregating inside the server is Redis's own way of doing a `GROUP BY` (the other databases do it in their query engine); the time is not comparable to a client-side aggregation.
 
 ## Resources
 

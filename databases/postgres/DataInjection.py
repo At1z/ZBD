@@ -1,7 +1,7 @@
 import psycopg
 
-import connections
-from dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
+from zbd import connections
+from zbd.dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
 
 SCHEMA = """
 DROP TABLE IF EXISTS transactions, products, customers CASCADE;
@@ -37,7 +37,6 @@ CREATE TABLE transactions (
 
 INDEXES = """
 CREATE INDEX ON transactions (customer_id);
-CREATE INDEX ON transactions (product_id);
 CREATE INDEX ON transactions (transaction_date);
 """
 

@@ -1,7 +1,7 @@
 import importlib.util
 from pathlib import Path
 
-from dataset import RetailDataset
+from zbd.dataset import RetailDataset
 
 ROOT = Path(__file__).parent
 DATABASES = ["postgres", "mysql", "mongodb", "redis"]
@@ -9,7 +9,7 @@ DATABASES = ["postgres", "mysql", "mongodb", "redis"]
 
 def load_module(db, name):
     # load by file path so the folders do not shadow installed packages (redis, mysql...)
-    path = ROOT / db / f"{name}.py"
+    path = ROOT / "databases" / db / f"{name}.py"
     spec = importlib.util.spec_from_file_location(f"{db}_{name}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

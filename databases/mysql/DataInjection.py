@@ -1,7 +1,7 @@
 import pymysql
 
-import connections
-from dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
+from zbd import connections
+from zbd.dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
 
 BATCH_SIZE = 10_000
 
@@ -38,12 +38,16 @@ SCHEMA = [
         payment_method   VARCHAR(32) NOT NULL,
         sales_channel    VARCHAR(32) NOT NULL,
         region           VARCHAR(32) NOT NULL,
-        INDEX (transaction_date),
         FOREIGN KEY (customer_id) REFERENCES customers (customer_id),
         FOREIGN KEY (product_id) REFERENCES products (product_id)
     )
     """,
 ]
+
+
+# built after the load, like PostgreSQL and MongoDB do; the foreign keys keep their implicit indexes on
+# customer_id / product_id from the start (a foreign key needs an index in InnoDB)
+INDEXES = "ALTER TABLE transactions ADD INDEX (transaction_date)"
 
 
 def insert_rows(conn, table, columns, rows):
@@ -76,6 +80,11 @@ def inject(dataset):
         for name, columns, rows in tables:
             insert_rows(conn, name, columns, rows)
             print(f"[mysql] {name} loaded")
+        with conn.cursor() as cur:
+            cur.execute(INDEXES)
+            cur.execute("ANALYZE TABLE customers, products, transactions")  # fresh statistics, like PostgreSQL's ANALYZE
+            cur.fetchall()
+        conn.commit()
     finally:
         conn.close()
 
