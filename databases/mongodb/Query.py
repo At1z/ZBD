@@ -9,6 +9,8 @@ Writes use the driver defaults (acknowledged, no journal wait), like the other d
 """
 from datetime import datetime
 
+from pymongo.errors import OperationFailure
+
 from zbd import connections
 
 BATCH = 1000          # ids per update_many in S15
@@ -55,8 +57,12 @@ def read_by_key(db, ids):
     return [(found, total)]
 
 
-def aggregate(db, pipeline):
-    return list(db.transactions.aggregate(pipeline, allowDiskUse=True))
+def aggregate(db, pipeline, scan=False):
+    """scan=True forces a scan of the whole collection (hint $natural) instead of the date index: for a filter that
+    matches a large part of the documents, the index plan reads them in date order, i.e. at random positions in the
+    collection, which at 10M documents no longer fits in the cache (78 s instead of seconds)."""
+    options = {"hint": {"$natural": 1}} if scan else {}
+    return list(db.transactions.aggregate(pipeline, allowDiskUse=True, **options))
 
 
 def medium(db):
@@ -80,7 +86,7 @@ def heavy(db, since, with_quantity):
         {"$match": {"revenue": {"$gt": 1000}}},
         {"$sort": {"revenue": -1, "_id.segment": 1, "_id.category": 1, "_id.region": 1}},
         {"$limit": 20},
-    ])
+    ], scan=True)
     extra = (lambda d: (d["quantity"],)) if with_quantity else (lambda d: ())
     return [(d["_id"]["segment"], d["_id"]["category"], d["_id"]["region"], d["n"], d["revenue"], *extra(d))
             for d in rows]
@@ -226,7 +232,15 @@ def s19(db, p):
 
 
 def s20(db, p):
-    return db.transactions.delete_many({"transaction_date": {"$lt": day(p.cutoff_date)}}).deleted_count
+    """Delete everything older than the cutoff (about half of the documents). Like in S08 the date index would read
+    the documents at random positions of the collection, so a scan of the collection is tried first; if the server
+    rejects the hint for a delete, the plain delete runs (the rejection happens before anything is deleted)."""
+    older = {"transaction_date": {"$lt": day(p.cutoff_date)}}
+    try:
+        return db.transactions.delete_many(older, hint=[("$natural", 1)]).deleted_count
+    except OperationFailure as error:
+        print(f"  [mongodb] S20: hint not accepted ({error}), deleting without it", flush=True)
+        return db.transactions.delete_many(older).deleted_count
 
 
 COLLECTIONS = ["transactions", "products", "customers"]

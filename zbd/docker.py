@@ -20,7 +20,11 @@ COMMANDS = {
     "zbd-postgres": ["-c", "shared_buffers=1536MB", "-c", "effective_cache_size=4GB"],
     "zbd-mysql": ["--innodb-buffer-pool-size=3G"],
     "zbd-mongodb": None,
-    "zbd-redis": ["redis-server", "--maxmemory", "5gb", "--maxmemory-policy", "noeviction"],
+    # Redis: no RDB snapshots / AOF. A snapshot forks the process and every page the server then changes is copied
+    # (copy-on-write), so a 4.8 GB dataset needs far more than the 6 GB limit while it is written: with the default
+    # snapshot policy the kernel killed Redis at 10M transactions (during S19 / S20).
+    "zbd-redis": ["redis-server", "--maxmemory", "5gb", "--maxmemory-policy", "noeviction",
+                  "--save", "", "--appendonly", "no"],
 }
 
 

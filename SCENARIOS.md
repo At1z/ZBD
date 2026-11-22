@@ -188,7 +188,7 @@ ORDER BY revenue DESC, c.customer_segment, p.category, t.region
 LIMIT 20;
 ```
 
-- **MongoDB:** `$match` po dacie + `$group` po wbudowanych polach (segment, kategoria) + `$match` + `$sort` + `$limit`, bez `$lookup`.
+- **MongoDB:** `$match` po dacie + `$group` po wbudowanych polach (segment, kategoria) + `$match` + `$sort` + `$limit`, bez `$lookup`; wymuszony skan kolekcji (`hint $natural`), bo przy 10M planner z indeksem po dacie czytał dokumenty losowo i był wielokrotnie wolniejszy.
 - **Redis:** Identyfikatory od `heavy_since` (`idx:tx:date`, paczkami) → skrypt Lua: `HMGET`, segment klienta (`HGET customer:{id}`) i kategoria (`HGET product:{id}`), `GROUP BY`; klient scala paczki i filtruje `HAVING`.
 
 ## 9. Miesięczny przychód per kategoria i grupa wiekowa
@@ -391,7 +391,7 @@ WHERE region = :region AND transaction_date >= :delete_start AND transaction_dat
 DELETE FROM transactions WHERE transaction_date < :cutoff_date;
 ```
 
-- **MongoDB:** `delete_many({transaction_date: {$lt: cutoff}})`.
+- **MongoDB:** `delete_many({transaction_date: {$lt: cutoff}})` z `hint $natural` (skan kolekcji zamiast indeksu po dacie); gdyby serwer odrzucił hint przy usuwaniu, wykonuje się zwykłe `delete_many`.
 - **Redis:** `ZRANGEBYSCORE idx:tx:date -inf (cutoff` → `DEL` + `SREM` / `ZREM` z indeksów, paczkami.
 
 ## 21. Liczba transakcji po usunięciach

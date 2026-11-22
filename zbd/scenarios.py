@@ -161,7 +161,7 @@ SCENARIOS = [
         ORDER BY revenue DESC, c.customer_segment, p.category, t.region
         LIMIT 20;
         """,
-        "`$match` po dacie + `$group` po wbudowanych polach (segment, kategoria) + `$match` + `$sort` + `$limit`, bez `$lookup`.",
+        "`$match` po dacie + `$group` po wbudowanych polach (segment, kategoria) + `$match` + `$sort` + `$limit`, bez `$lookup`; wymuszony skan kolekcji (`hint $natural`), bo przy 10M planner z indeksem po dacie czytał dokumenty losowo i był wielokrotnie wolniejszy.",
         "Identyfikatory od `heavy_since` (`idx:tx:date`, paczkami) → skrypt Lua: `HMGET`, segment klienta (`HGET customer:{id}`) i kategoria (`HGET product:{id}`), `GROUP BY`; klient scala paczki i filtruje `HAVING`.",
     ),
     Scenario(
@@ -277,7 +277,7 @@ SCENARIOS = [
         """
         DELETE FROM transactions WHERE transaction_date < :cutoff_date;
         """,
-        "`delete_many({transaction_date: {$lt: cutoff}})`.",
+        "`delete_many({transaction_date: {$lt: cutoff}})` z `hint $natural` (skan kolekcji zamiast indeksu po dacie); gdyby serwer odrzucił hint przy usuwaniu, wykonuje się zwykłe `delete_many`.",
         "`ZRANGEBYSCORE idx:tx:date -inf (cutoff` → `DEL` + `SREM` / `ZREM` z indeksów, paczkami.",
     ),
     Scenario(
