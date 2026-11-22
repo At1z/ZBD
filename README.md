@@ -38,7 +38,7 @@ uv sync          # first time only: creates .venv and installs the drivers
 uv run main.py
 ```
 
-Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `redis`. Add more with `uv add <package>`.
+Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `redis`, `hiredis` (C parser for the Redis client, picked up automatically; speeds up reading millions of small replies). Add more with `uv add <package>`.
 
 | Database   | Image (pinned)      | Container    | Port  | Login / password |
 |------------|---------------------|--------------|-------|------------------|
