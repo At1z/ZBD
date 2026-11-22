@@ -37,7 +37,6 @@ CREATE TABLE transactions (
 
 INDEXES = """
 CREATE INDEX ON transactions (customer_id);
-CREATE INDEX ON transactions (product_id);
 CREATE INDEX ON transactions (transaction_date);
 """
 

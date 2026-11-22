@@ -7,4 +7,6 @@ def init():
         image="redis:8.10.3",
         ports={6379: 6379},
         health_cmd='redis-cli ping',
+        # below the 5g container limit: when full, writes fail with an error instead of the container being killed
+        command=["redis-server", "--maxmemory", "4gb", "--maxmemory-policy", "noeviction"],
     )

@@ -17,6 +17,7 @@ import argparse
 import csv
 import hashlib
 import multiprocessing
+import os
 import time
 from collections import defaultdict
 from decimal import Decimal
@@ -32,9 +33,11 @@ DEFAULT_SIZES = [100_000, 1_000_000, 10_000_000]
 
 
 def normalize(result):
-    """Make results comparable between databases (Decimal / float -> rounded int)."""
+    """Make results comparable between databases (Decimal / float -> rounded int).
+    Rounded to cents first: a float sum can land just below x.5 where the exact Decimal sum is x.5."""
     if isinstance(result, (list, tuple)):
-        return [tuple(round(float(v)) if isinstance(v, (Decimal, float)) else v for v in row) for row in result]
+        return [tuple(round(round(float(v), 2)) if isinstance(v, (Decimal, float)) else v for v in row)
+                for row in result]
     return result
 
 
@@ -74,18 +77,35 @@ def _child(pipe, db, scenario_id, dataset, params):
         pipe.close()
 
 
-def run_scenario(db, scenario_id, dataset, params, timeout):
-    """Returns (status, seconds, result, message); status: ok | timeout | oom | error."""
+def rss_gb(pid):
+    """Resident memory of a process in GB (Linux); 0 where /proc is not available."""
+    try:
+        with open(f"/proc/{pid}/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1024**3
+    except (OSError, ValueError):
+        return 0.0
+
+
+def run_scenario(db, scenario_id, dataset, params, timeout, memory_limit_gb=0):
+    """Returns (status, seconds, result, message); status: ok | timeout | oom | error.
+    The child is killed when it runs longer than `timeout` or its memory exceeds `memory_limit_gb` (0 = no limit),
+    so a scenario that collects millions of rows in Python cannot take the whole machine down."""
     context = multiprocessing.get_context("fork")  # the child reuses the loaded dataset without pickling it
     receiver, sender = context.Pipe(duplex=False)
     process = context.Process(target=_child, args=(sender, db, scenario_id, dataset, params), daemon=True)
     process.start()
     sender.close()
     try:
-        if not receiver.poll(timeout):
-            process.kill()
-            process.join()
-            return "timeout", timeout, None, f"stopped after {timeout}s"
+        deadline = time.monotonic() + timeout
+        while not receiver.poll(0.5):
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.join()
+                return "timeout", timeout, None, f"stopped after {timeout}s"
+            if memory_limit_gb and rss_gb(process.pid) > memory_limit_gb:
+                process.kill()
+                process.join()
+                return "oom", 0.0, None, f"client process used more than {memory_limit_gb} GB"
         try:
             kind, seconds, payload = receiver.recv()
         except EOFError:  # the child died without answering
@@ -104,7 +124,7 @@ def run_scenario(db, scenario_id, dataset, params, timeout):
             process.join()
 
 
-def run_database(db, dataset, expected, params, timeout, load_timeout):
+def run_database(db, dataset, expected, params, timeout, load_timeout, memory_limit_gb):
     """One run on one database. Returns (records, answers); records are the CSV rows without size / run."""
     query = load_module(db, "Query")
     missing = [i for i in SCENARIO_IDS[1:] if i not in getattr(query, "SCENARIOS", {})]
@@ -118,7 +138,7 @@ def run_database(db, dataset, expected, params, timeout, load_timeout):
             status, seconds, result, message = "skipped", 0.0, None, "an earlier scenario failed"
         else:
             status, seconds, result, message = run_scenario(
-                db, s.id, dataset, params, load_timeout if s.id == "S01" else timeout)
+                db, s.id, dataset, params, load_timeout if s.id == "S01" else timeout, memory_limit_gb)
             if status == "ok" and s.id == "S01" and not injection.check(expected, quiet=True):
                 status, message = "error", "data incomplete after loading"
             if status != "ok" and s.operation != "READ":
@@ -194,6 +214,8 @@ def main():
     parser.add_argument("--dbs", nargs="+", default=DATABASES, choices=DATABASES)
     parser.add_argument("--timeout", type=int, default=1800, help="seconds per scenario (default: 1800)")
     parser.add_argument("--load-timeout", type=int, default=7200, help="seconds for S01, the bulk load (default: 7200)")
+    parser.add_argument("--client-memory-gb", type=float, default=3.0,
+                        help="kill a scenario whose Python process uses more memory than this (default: 3, 0 = off)")
     parser.add_argument("--isolate", action="store_true",
                         help="stop the other databases' containers while one is measured (starts them again at "
                              "the end); frees RAM for large sizes, adds a few seconds per run and database")
@@ -231,7 +253,8 @@ def run(args):
                     print(f"\n[{db}] {size:,} transactions, run {run}", flush=True)
                     if args.isolate:
                         switch_to(db)
-                    records, answers[db] = run_database(db, dataset, expected, params, args.timeout, args.load_timeout)
+                    records, answers[db] = run_database(db, dataset, expected, params, args.timeout, args.load_timeout,
+                                                       args.client_memory_gb)
                     results[db] = records
                     for record in records:
                         writer.writerow({"size": size, "run": run, "database": db, **record})

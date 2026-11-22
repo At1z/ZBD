@@ -45,6 +45,8 @@ Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `re
 
 Exact versions are pinned on purpose, so benchmark results stay comparable over time. After changing a version, remove the old container (`docker rm -f ...` below), otherwise the old image keeps running.
 
+Every container has the same hard limit of **5 GB RAM** (`--memory=5g --memory-swap=5g`, see `MEMORY_LIMIT` in `docker_utils.py`), so the comparison is fair and a database that runs out of memory (e.g. Redis with 10M transactions) is stopped by Docker instead of freezing the machine. Redis additionally runs with `maxmemory 4gb` and `noeviction`: when full, writes fail with an error instead of the container being killed. The limit is set when a container is created: containers created earlier have none, `uv run main.py` warns about them, recreate them with the `docker rm -f` command below.
+
 Running it again is safe: existing containers are restarted, not recreated.
 To remove the containers: `docker rm -f zbd-postgres zbd-mysql zbd-mongodb zbd-redis`.
 
@@ -108,20 +110,25 @@ uv run benchmark.py --sizes 100000 --runs 1              # quick check
 uv run benchmark.py --sizes 100000 --dbs postgres mongodb
 uv run benchmark.py --timeout 600 --load-timeout 3600    # seconds per scenario / for the bulk load
 uv run benchmark.py --isolate                            # stop the other containers while one database is measured
+uv run benchmark.py --client-memory-gb 2                 # kill a scenario whose Python process exceeds 2 GB (default 3)
 uv run scenarios.py --size 1000000                       # show the parameters the scenarios use
 ```
 
 - Databases are measured one after another, never in parallel. `--isolate` also stops the other databases' containers during a measurement (frees RAM for 10M rows, adds a few seconds per run and database) and starts them all again at the end.
-- Every scenario runs in its own process: a scenario that takes longer than `--timeout` is recorded as `timeout`, one killed by the system as `oom`, an exception as `error`. A failed READ does not stop the run; a failed CREATE / UPDATE / DELETE makes the rest of the run `skipped`, because later results would not be comparable.
+- Every scenario runs in its own process: a scenario that takes longer than `--timeout` is recorded as `timeout`, one whose Python process exceeds `--client-memory-gb` or that is killed by the system as `oom`, an exception as `error`. A failed READ does not stop the run; a failed CREATE / UPDATE / DELETE makes the rest of the run `skipped`, because later results would not be comparable.
 - Results are appended to `results/runs.csv` (`size, run, database, scenario, operation, difficulty, seconds, rows, status, digest`). Finished (database, size, run) triples are skipped, so an interrupted benchmark can be started again with the same arguments.
 - Ids, filters and new rows are derived from the data (`Params` in `scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.
 - Each `Query.py` has to provide `connect()`, `disconnect(ctx)` and `SCENARIOS = {"S02": fn, ..., "S24": fn}` (S01 is `DataInjection.inject`). Note: the benchmark wipes the data in the databases, run `uv run main.py` afterwards to load the full dataset again.
 
 ## Files in each database folder
 
-- `initDB.py` – database initialization (currently: starts the container)
-- `DataInjection.py` – CREATE: loads the 3 tables from `RetailDataset`, plus `check()` (health query)
-- `Query.py` – READ, UPDATE and DELETE: `simple()`, `medium()`, `heavy()`, `update(ids)` (`quantity + 1`), `delete_all()` (Redis: `FLUSHDB`)
+- `initDB.py` – database initialization (starts the container)
+- `DataInjection.py` – CREATE (scenario S01): schema, bulk load of the 3 tables from `RetailDataset`, indexes, plus `check()` (health query)
+- `Query.py` – scenarios S02..S24 (`SCENARIOS`, `connect()`, `disconnect()`), see [SCENARIOS.md](SCENARIOS.md)
+
+Indexes: only the ones some scenario uses (transaction date, customer; Redis also the `Online` channel set). There is no `product_id` or `region` index in any database; the only exception is MySQL, where InnoDB creates an index for the `product_id` foreign key automatically.
+
+Redis has no joins or aggregation, so scenarios with joins / grouping read the transactions page by page (by rank in the date index, or with SSCAN) and aggregate in Python. Memory of the client stays flat whatever the size, but these scenarios are slow by nature.
 
 ## Resources
 

@@ -64,7 +64,6 @@ def inject(dataset):
         insert_docs(db[name], docs)
         print(f"[mongodb] {name} loaded")
     db.transactions.create_index("customer_id")
-    db.transactions.create_index("product_id")
     db.transactions.create_index("transaction_date")
 
 

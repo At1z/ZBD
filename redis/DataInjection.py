@@ -9,10 +9,9 @@ BATCH_SIZE = 10_000
 # Key layout (Redis has no joins, so references are resolved by the client):
 #   customer:{id}, product:{id}, transaction:{id}      hashes (transaction holds customer_id / product_id)
 #   ids:customers, ids:products                        sets of all ids
-#   idx:tx:customer:{id}, idx:tx:product:{id}          sets of transaction ids
-#   idx:tx:region:{r}, idx:tx:channel:{c}              sets of transaction ids
+#   idx:tx:customer:{id}, idx:tx:channel:{c}           sets of transaction ids
 #   idx:tx:date                                        sorted set, score = date ordinal
-#   idx:product:category:{c}                           sets of product ids
+# Only indexes that some scenario uses (SCENARIOS.md); no product / region index (MySQL only keeps the one InnoDB creates for its foreign key).
 
 
 def inject(dataset):
@@ -23,7 +22,6 @@ def inject(dataset):
     for row in dataset.iter_products():
         pipe.hset(f"product:{row['product_id']}", mapping=row)
         pipe.sadd("ids:products", row["product_id"])
-        pipe.sadd(f"idx:product:category:{row['category']}", row["product_id"])
     pipe.execute()
     print("[redis] products loaded")
 
@@ -41,8 +39,6 @@ def inject(dataset):
         tid = row["transaction_id"]
         pipe.hset(f"transaction:{tid}", mapping=row)
         pipe.sadd(f"idx:tx:customer:{row['customer_id']}", tid)
-        pipe.sadd(f"idx:tx:product:{row['product_id']}", tid)
-        pipe.sadd(f"idx:tx:region:{row['region']}", tid)
         pipe.sadd(f"idx:tx:channel:{row['sales_channel']}", tid)
         pipe.zadd("idx:tx:date", {tid: date.fromisoformat(row["transaction_date"]).toordinal()})
         if i % BATCH_SIZE == 0:
