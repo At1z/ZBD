@@ -58,7 +58,7 @@ CREATE INDEX ON transactions (transaction_date);
 -- indeksy kluczy obcych (customer_id, product_id) InnoDB tworzy sam od początku
 ```
 
-- **MongoDB:** `insert_many(ordered=False)` paczkami po 50 000 + 2 indeksy na `transactions` (`customer_id`, `transaction_date`).
+- **MongoDB:** `insert_many(ordered=False)` paczkami po 50 000 + 2 indeksy na `transactions` (`customer_id`, `transaction_date`). Każda transakcja ma wbudowane pola klienta (segment, grupa wiekowa) i produktu (kategoria, nazwa), więc dokumenty są większe.
 - **Redis:** Pipeline: `HSET` + `SADD` / `ZADD` (3 indeksy na transakcję: klient, kanał, data).
 
 ## 2. Odczyt po kluczu głównym (×1000)
@@ -127,7 +127,7 @@ GROUP BY p.category
 ORDER BY revenue DESC, p.category;
 ```
 
-- **MongoDB:** `$group` po `product_id` (120 grup) → `$lookup` na `products` + `$unwind` → `$group` po kategorii.
+- **MongoDB:** `$group` po wbudowanej kategorii produktu (bez `$lookup`).
 - **Redis:** Wszystkie transakcje (`ZRANGE idx:tx:date`) → `HMGET`; kategoria ze słownika produktów, agregacja w kliencie.
 
 ## 6. Top 10 produktów wg przychodu
@@ -147,7 +147,7 @@ ORDER BY revenue DESC, p.product_id
 LIMIT 10;
 ```
 
-- **MongoDB:** `$group` po `product_id` → `$sort` → `$limit` → `$lookup` na `products`.
+- **MongoDB:** `$group` po `product_id` (nazwa produktu wbudowana, `$first`) → `$sort` → `$limit`.
 - **Redis:** Jak S05, ale grupowanie po `product_id` w kliencie.
 
 ## 7. Zakupy 200 klientów z nazwami produktów
@@ -165,7 +165,7 @@ JOIN products p USING (product_id)
 WHERE t.customer_id = :customer_id;   -- 200 razy
 ```
 
-- **MongoDB:** `aggregate`: `$match` po `customer_id` + `$lookup` na `products`, w pętli.
+- **MongoDB:** `find` po `customer_id` (nazwa produktu wbudowana), w pętli.
 - **Redis:** `SMEMBERS idx:tx:customer:{id}` → `HMGET product_id`, nazwa ze słownika produktów.
 
 ## 8. Segment × kategoria × region (JOIN 3 tabel)
@@ -188,7 +188,7 @@ ORDER BY revenue DESC, c.customer_segment, p.category, t.region
 LIMIT 20;
 ```
 
-- **MongoDB:** `$match` po dacie + dwa `$lookup` + `$group` + `$match` + `$sort` + `$limit`.
+- **MongoDB:** `$match` po dacie + `$group` po wbudowanych polach (segment, kategoria) + `$match` + `$sort` + `$limit`, bez `$lookup`.
 - **Redis:** `ZRANGEBYSCORE idx:tx:date` → `HMGET`; segment klienta dociągany `HGET`, agregacja w kliencie.
 
 ## 9. Miesięczny przychód per kategoria i grupa wiekowa
@@ -210,7 +210,7 @@ ORDER BY revenue DESC, y, m, p.category, c.customer_age_group
 LIMIT 20;
 ```
 
-- **MongoDB:** Dwa `$lookup` + `$group` po `$year` / `$month` + `$sort` + `$limit`.
+- **MongoDB:** `$group` po `$year` / `$month` i wbudowanych polach (kategoria, grupa wiekowa) + `$sort` + `$limit`, bez `$lookup`.
 - **Redis:** Pełny skan transakcji; rok i miesiąc z daty, kategoria i grupa wiekowa ze słowników; agregacja w kliencie.
 
 ## 10. Pojedyncze INSERT-y (×1000)
@@ -225,7 +225,7 @@ LIMIT 20;
 INSERT INTO transactions (transaction_id, ..., region) VALUES (...);   -- 1000 razy
 ```
 
-- **MongoDB:** `insert_one` w pętli.
+- **MongoDB:** `insert_one` w pętli (wcześniej odczyt pól klienta i produktu, które trzeba wbudować).
 - **Redis:** `HSET` + `SADD` / `ZADD` w pętli (wszystkie indeksy).
 
 ## 11. Wstawienie paczki 10 000 transakcji
@@ -240,7 +240,7 @@ INSERT INTO transactions (transaction_id, ..., region) VALUES (...);   -- 1000 r
 INSERT INTO transactions (transaction_id, ..., region) VALUES (...), (...), ...;   -- paczki, razem 10 000
 ```
 
-- **MongoDB:** `insert_many` paczkami.
+- **MongoDB:** `insert_many` paczkami (wcześniej odczyt pól klienta i produktu do wbudowania).
 - **Redis:** Pipeline `HSET` + `SADD` / `ZADD`.
 
 ## 12. Odczyt wstawionych rekordów po kluczu (×1000)

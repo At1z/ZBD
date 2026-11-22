@@ -1,3 +1,4 @@
+import sys
 from datetime import datetime
 
 from pymongo.errors import PyMongoError
@@ -30,8 +31,8 @@ def transaction_doc(row):
     return {
         "_id": row["transaction_id"],
         "transaction_date": datetime.fromisoformat(row["transaction_date"]),
-        "customer_id": row["customer_id"],  # reference to customers._id (use $lookup)
-        "product_id": row["product_id"],  # reference to products._id (use $lookup)
+        "customer_id": row["customer_id"],  # also kept as a reference to customers._id
+        "product_id": row["product_id"],  # also kept as a reference to products._id
         "quantity": int(row["quantity"]),
         "discount_pct": int(row["discount_pct"]),
         "sales_amount": float(row["sales_amount"]),
@@ -39,6 +40,32 @@ def transaction_doc(row):
         "sales_channel": row["sales_channel"],
         "region": row["region"],
     }
+
+
+def embed_values(doc, segment, age_group, category, product_name):
+    """Embed the customer and product fields the scenarios read, so queries need no $lookup:
+    transaction = {..., customer: {segment, age_group}, product: {category, name}}."""
+    doc["customer"] = {"segment": segment, "age_group": age_group}
+    doc["product"] = {"category": category, "name": product_name}
+    return doc
+
+
+def embed(doc, customer, product):
+    """Same, from a customer / product document (used by S10 / S11 for new transactions)."""
+    return embed_values(doc, customer["customer_segment"], customer["customer_age_group"],
+                        product["category"], product["product_name"])
+
+
+def transaction_docs(dataset):
+    """Transaction documents with embedded fields. Customers are kept as small tuples (millions of them at 10M
+    transactions), with interned strings: a few distinct values shared by every entry."""
+    products = {r["product_id"]: (r["category"], r["product_name"]) for r in dataset.iter_products()}
+    customers = {r["customer_id"]: (sys.intern(r["customer_segment"]), sys.intern(r["customer_age_group"]))
+                 for r in dataset.iter_customers()}
+    for row in dataset.iter_transactions():
+        segment, age_group = customers[row["customer_id"]]
+        category, name = products[row["product_id"]]
+        yield embed_values(transaction_doc(row), segment, age_group, category, name)
 
 
 def insert_docs(collection, docs):
@@ -57,7 +84,7 @@ def inject(dataset):
     collections = [
         ("customers", (customer_doc(r) for r in dataset.iter_customers())),
         ("products", (product_doc(r) for r in dataset.iter_products())),
-        ("transactions", (transaction_doc(r) for r in dataset.iter_transactions())),
+        ("transactions", transaction_docs(dataset)),
     ]
     for name, docs in collections:
         db[name].drop()

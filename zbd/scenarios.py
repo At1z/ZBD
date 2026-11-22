@@ -70,7 +70,7 @@ SCENARIOS = [
         -- MySQL: wielowierszowy INSERT po 10 000 wierszy; indeks po dacie po załadowaniu, potem ANALYZE TABLE;
         -- indeksy kluczy obcych (customer_id, product_id) InnoDB tworzy sam od początku
         """,
-        "`insert_many(ordered=False)` paczkami po 50 000 + 2 indeksy na `transactions` (`customer_id`, `transaction_date`).",
+        "`insert_many(ordered=False)` paczkami po 50 000 + 2 indeksy na `transactions` (`customer_id`, `transaction_date`). Każda transakcja ma wbudowane pola klienta (segment, grupa wiekowa) i produktu (kategoria, nazwa), więc dokumenty są większe.",
         "Pipeline: `HSET` + `SADD` / `ZADD` (3 indeksy na transakcję: klient, kanał, data).",
     ),
     Scenario(
@@ -116,7 +116,7 @@ SCENARIOS = [
         GROUP BY p.category
         ORDER BY revenue DESC, p.category;
         """,
-        "`$group` po `product_id` (120 grup) → `$lookup` na `products` + `$unwind` → `$group` po kategorii.",
+        "`$group` po wbudowanej kategorii produktu (bez `$lookup`).",
         "Wszystkie transakcje (`ZRANGE idx:tx:date`) → `HMGET`; kategoria ze słownika produktów, agregacja w kliencie.",
     ),
     Scenario(
@@ -130,7 +130,7 @@ SCENARIOS = [
         ORDER BY revenue DESC, p.product_id
         LIMIT 10;
         """,
-        "`$group` po `product_id` → `$sort` → `$limit` → `$lookup` na `products`.",
+        "`$group` po `product_id` (nazwa produktu wbudowana, `$first`) → `$sort` → `$limit`.",
         "Jak S05, ale grupowanie po `product_id` w kliencie.",
     ),
     Scenario(
@@ -143,7 +143,7 @@ SCENARIOS = [
         JOIN products p USING (product_id)
         WHERE t.customer_id = :customer_id;   -- 200 razy
         """,
-        "`aggregate`: `$match` po `customer_id` + `$lookup` na `products`, w pętli.",
+        "`find` po `customer_id` (nazwa produktu wbudowana), w pętli.",
         "`SMEMBERS idx:tx:customer:{id}` → `HMGET product_id`, nazwa ze słownika produktów.",
     ),
     Scenario(
@@ -161,7 +161,7 @@ SCENARIOS = [
         ORDER BY revenue DESC, c.customer_segment, p.category, t.region
         LIMIT 20;
         """,
-        "`$match` po dacie + dwa `$lookup` + `$group` + `$match` + `$sort` + `$limit`.",
+        "`$match` po dacie + `$group` po wbudowanych polach (segment, kategoria) + `$match` + `$sort` + `$limit`, bez `$lookup`.",
         "`ZRANGEBYSCORE idx:tx:date` → `HMGET`; segment klienta dociągany `HGET`, agregacja w kliencie.",
     ),
     Scenario(
@@ -177,7 +177,7 @@ SCENARIOS = [
         ORDER BY revenue DESC, y, m, p.category, c.customer_age_group
         LIMIT 20;
         """,
-        "Dwa `$lookup` + `$group` po `$year` / `$month` + `$sort` + `$limit`.",
+        "`$group` po `$year` / `$month` i wbudowanych polach (kategoria, grupa wiekowa) + `$sort` + `$limit`, bez `$lookup`.",
         "Pełny skan transakcji; rok i miesiąc z daty, kategoria i grupa wiekowa ze słowników; agregacja w kliencie.",
     ),
     Scenario(
@@ -187,7 +187,7 @@ SCENARIOS = [
         """
         INSERT INTO transactions (transaction_id, ..., region) VALUES (...);   -- 1000 razy
         """,
-        "`insert_one` w pętli.",
+        "`insert_one` w pętli (wcześniej odczyt pól klienta i produktu, które trzeba wbudować).",
         "`HSET` + `SADD` / `ZADD` w pętli (wszystkie indeksy).",
     ),
     Scenario(
@@ -196,7 +196,7 @@ SCENARIOS = [
         """
         INSERT INTO transactions (transaction_id, ..., region) VALUES (...), (...), ...;   -- paczki, razem 10 000
         """,
-        "`insert_many` paczkami.",
+        "`insert_many` paczkami (wcześniej odczyt pól klienta i produktu do wbudowania).",
         "Pipeline `HSET` + `SADD` / `ZADD`.",
     ),
     Scenario(

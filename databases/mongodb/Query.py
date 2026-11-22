@@ -2,7 +2,9 @@
 
 Contract used by benchmark.py: connect() -> ctx (the database), disconnect(ctx), SCENARIOS = {id: fn(ctx, params)}.
 A scenario returns a list of tuples (READ) or the number of affected documents (CREATE / UPDATE / DELETE).
-Joins are `$lookup` stages (collections hold references: customer_id / product_id -> _id).
+Embedded model: every transaction carries the customer (segment, age_group) and product (category, name) fields the
+scenarios need (see DataInjection.embed), so there are no joins / $lookup stages. The price of this model shows in
+S01 (bigger documents) and S10 / S11, where those fields have to be read before a new transaction is inserted.
 Writes use the driver defaults (acknowledged, no journal wait), like the other databases' defaults.
 """
 from datetime import datetime
@@ -30,18 +32,16 @@ def date_range(start, end):
     return {"$gte": day(start), "$lt": day(end)}
 
 
-def lookup(collection, local_field, alias):
-    return [
-        {"$lookup": {"from": collection, "localField": local_field, "foreignField": "_id", "as": alias}},
-        {"$unwind": f"${alias}"},
-    ]
-
-
-def transaction_docs(rows):
-    # reuse the converter of the loader so inserted documents look exactly like loaded ones
+def embedded_docs(db, rows):
+    """Transaction documents for new rows: the customer and product fields to embed are read from the collections."""
     from main import load_module
-    convert = load_module("mongodb", "DataInjection").transaction_doc
-    return [convert(row) for row in rows]
+    injection = load_module("mongodb", "DataInjection")
+    products = {d["_id"]: d for d in db.products.find({}, {"category": 1, "product_name": 1})}
+    ids = list({row["customer_id"] for row in rows})
+    customers = {d["_id"]: d for d in db.customers.find(
+        {"_id": {"$in": ids}}, {"customer_segment": 1, "customer_age_group": 1})}
+    return [injection.embed(injection.transaction_doc(row), customers[row["customer_id"]],
+                            products[row["product_id"]]) for row in rows]
 
 
 def read_by_key(db, ids):
@@ -60,13 +60,8 @@ def aggregate(db, pipeline):
 
 
 def medium(db):
-    # Group by product_id first (120 groups), join the small products collection on the groups only, then group by
-    # category. Same result as joining every transaction, but 10M $lookup stages become 120 (the way S06 does it).
     rows = aggregate(db, [
-        {"$group": {"_id": "$product_id", "n": {"$sum": 1}, "revenue": {"$sum": "$sales_amount"},
-                    "quantity": {"$sum": "$quantity"}}},
-        *lookup("products", "_id", "product"),
-        {"$group": {"_id": "$product.category", "n": {"$sum": "$n"}, "revenue": {"$sum": "$revenue"},
+        {"$group": {"_id": "$product.category", "n": {"$sum": 1}, "revenue": {"$sum": "$sales_amount"},
                     "quantity": {"$sum": "$quantity"}}},
         {"$sort": {"revenue": -1, "_id": 1}},
     ])
@@ -76,10 +71,8 @@ def medium(db):
 def heavy(db, since, with_quantity):
     rows = aggregate(db, [
         {"$match": {"transaction_date": {"$gte": day(since)}}},
-        *lookup("customers", "customer_id", "customer"),
-        *lookup("products", "product_id", "product"),
         {"$group": {
-            "_id": {"segment": "$customer.customer_segment", "category": "$product.category", "region": "$region"},
+            "_id": {"segment": "$customer.segment", "category": "$product.category", "region": "$region"},
             "n": {"$sum": 1},
             "revenue": {"$sum": "$sales_amount"},
             "quantity": {"$sum": "$quantity"},
@@ -118,26 +111,20 @@ def s05(db, p):
 
 def s06(db, p):
     rows = aggregate(db, [
-        {"$group": {"_id": "$product_id", "revenue": {"$sum": "$sales_amount"}}},
+        {"$group": {"_id": "$product_id", "name": {"$first": "$product.name"},
+                    "revenue": {"$sum": "$sales_amount"}}},
         {"$sort": {"revenue": -1, "_id": 1}},
         {"$limit": 10},
-        {"$lookup": {"from": "products", "localField": "_id", "foreignField": "_id", "as": "product"}},
-        {"$unwind": "$product"},
-        {"$sort": {"revenue": -1, "_id": 1}},
     ])
-    return [(d["_id"], d["product"]["product_name"], d["revenue"]) for d in rows]
+    return [(d["_id"], d["name"], d["revenue"]) for d in rows]
 
 
 def s07(db, p):
     rows, names = 0, set()
     for customer_id in p.customer_ids:
-        for d in db.transactions.aggregate([
-            {"$match": {"customer_id": customer_id}},
-            *lookup("products", "product_id", "product"),
-            {"$project": {"name": "$product.product_name"}},
-        ]):
+        for d in db.transactions.find({"customer_id": customer_id}, {"product.name": 1}):
             rows += 1
-            names.add(d["name"])
+            names.add(d["product"]["name"])
     return [(rows, len(names))]
 
 
@@ -147,11 +134,9 @@ def s08(db, p):
 
 def s09(db, p):
     rows = aggregate(db, [
-        *lookup("customers", "customer_id", "customer"),
-        *lookup("products", "product_id", "product"),
         {"$group": {
             "_id": {"y": {"$year": "$transaction_date"}, "m": {"$month": "$transaction_date"},
-                    "category": "$product.category", "age": "$customer.customer_age_group"},
+                    "category": "$product.category", "age": "$customer.age_group"},
             "revenue": {"$sum": "$sales_amount"},
         }},
         {"$sort": {"revenue": -1, "_id.y": 1, "_id.m": 1, "_id.category": 1, "_id.age": 1}},
@@ -188,14 +173,14 @@ def s23(db, p):
 
 def s10(db, p):
     inserted = 0
-    for doc in transaction_docs(p.new_single):
+    for doc in embedded_docs(db, p.new_single):
         db.transactions.insert_one(doc)
         inserted += 1
     return inserted
 
 
 def s11(db, p):
-    docs = transaction_docs(p.new_batch)
+    docs = embedded_docs(db, p.new_batch)
     inserted = 0
     for i in range(0, len(docs), INSERT_BATCH):
         inserted += len(db.transactions.insert_many(docs[i:i + INSERT_BATCH], ordered=False).inserted_ids)
