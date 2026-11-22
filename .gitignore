@@ -22,3 +22,4 @@ data/
 results/*.csv
 # the benchmark results are the source of truth for the report: keep them in git
 !results/runs*.csv
+!results/old*.csv

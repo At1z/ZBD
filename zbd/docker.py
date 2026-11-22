@@ -1,3 +1,4 @@
+import json
 import subprocess
 import time
 
@@ -9,6 +10,18 @@ MEMORY_LIMIT = "6g"
 MEMORY_LIMIT_BYTES = 6 * 1024**3
 CPU_LIMIT = "4"
 CPU_LIMIT_NANO = 4 * 10**9
+
+# Server settings passed to the containers. Without them every engine runs with tiny defaults (MySQL's InnoDB buffer
+# pool is 128 MB) and a 10M-row table does not fit in memory, which measures the default settings, not the engine.
+# MySQL gets 3 GB of buffer pool (half of the container); Postgres the usual quarter (1.5 GB) because it also relies on
+# the OS page cache (effective_cache_size). MongoDB's WiredTiger cache is ~50% of the container by default and
+# Redis is capped by maxmemory, so both are already in that range.
+COMMANDS = {
+    "zbd-postgres": ["-c", "shared_buffers=1536MB", "-c", "effective_cache_size=4GB"],
+    "zbd-mysql": ["--innodb-buffer-pool-size=3G"],
+    "zbd-mongodb": None,
+    "zbd-redis": ["redis-server", "--maxmemory", "5gb", "--maxmemory-policy", "noeviction"],
+}
 
 
 def docker(*args):
@@ -48,15 +61,20 @@ def stop_container(name):
 
 
 def wrong_limits(name):
-    """A message when the existing container has other limits than MEMORY_LIMIT / CPU_LIMIT, else None
-    (also None when the container does not exist yet: it will be created with the right limits)."""
+    """A message when the existing container has other limits / settings than MEMORY_LIMIT, CPU_LIMIT and COMMANDS,
+    else None (also None when the container does not exist yet: it will be created with the right ones)."""
     if not docker("ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Names}}"):
         return None
     memory, nano_cpus = docker("inspect", "--format", "{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}", name).split()
-    if memory == str(MEMORY_LIMIT_BYTES) and nano_cpus == str(CPU_LIMIT_NANO):
-        return None
-    return (f"[{name}] has memory limit {memory} bytes and cpu limit {nano_cpus} nano-cpus, "
-            f"expected {MEMORY_LIMIT} and {CPU_LIMIT} cpus. Recreate it: docker rm -f {name}")
+    if memory != str(MEMORY_LIMIT_BYTES) or nano_cpus != str(CPU_LIMIT_NANO):
+        return (f"[{name}] has memory limit {memory} bytes and cpu limit {nano_cpus} nano-cpus, "
+                f"expected {MEMORY_LIMIT} and {CPU_LIMIT} cpus. Recreate it: docker rm -f {name}")
+    expected = COMMANDS.get(name)
+    if expected:
+        actual = json.loads(docker("inspect", "--format", "{{json .Config.Cmd}}", name))
+        if actual != expected:
+            return (f"[{name}] runs with settings {actual}, expected {expected}. Recreate it: docker rm -f {name}")
+    return None
 
 
 def warn_if_wrong_limit(name):

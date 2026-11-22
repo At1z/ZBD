@@ -1,4 +1,4 @@
-from zbd.docker import run_container
+from zbd.docker import COMMANDS, run_container
 
 
 def init():
@@ -8,4 +8,5 @@ def init():
         ports={3306: 3306},
         env={"MYSQL_ROOT_PASSWORD": "admin", "MYSQL_DATABASE": "zbd"},
         health_cmd='mysqladmin ping -h localhost -uroot -padmin',
+        command=COMMANDS["zbd-mysql"],
     )

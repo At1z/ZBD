@@ -14,7 +14,7 @@ ZBD/
 ├── SCENARIOS.md       # description of every scenario (generated)
 ├── zbd/               # shared code (package)
 │   ├── connections.py     # connection factories shared by all databases
-│   ├── docker.py          # starts / stops containers (memory limit, health checks)
+│   ├── docker.py          # starts / stops containers (limits, engine settings, health checks)
 │   ├── dataset.py         # RetailDataset: downloads, splits into 3 tables, replicates
 │   └── scenarios.py       # the 24 scenarios and their shared parameters
 ├── databases/
@@ -49,7 +49,9 @@ Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `re
 
 Exact versions are pinned on purpose, so benchmark results stay comparable over time. After changing a version, remove the old container (`docker rm -f ...` below), otherwise the old image keeps running.
 
-Every container has the same hard limits (see `MEMORY_LIMIT` and `CPU_LIMIT` in `zbd/docker.py`): **6 GB RAM** (`--memory=6g --memory-swap=6g`) and **4 CPUs** (`--cpus=4`). Equal limits keep the comparison fair (no database wins just by using more cores, e.g. PostgreSQL's parallel scans), and a database that runs out of memory (e.g. Redis with 10M transactions) is stopped by Docker instead of freezing the machine. Redis additionally runs with `maxmemory 5gb` and `noeviction`: when full, writes fail with an error instead of the container being killed. The limits are set when a container is created: containers created earlier have other ones: `uv run main.py` warns about them and `benchmark.py` refuses to measure (`--allow-wrong-limits` overrides), recreate them with the `docker rm -f` command below. **Results measured under different limits must not be mixed in one `runs.csv`.**
+Every container has the same hard limits (see `MEMORY_LIMIT` and `CPU_LIMIT` in `zbd/docker.py`): **6 GB RAM** (`--memory=6g --memory-swap=6g`) and **4 CPUs** (`--cpus=4`). Equal limits keep the comparison fair (no database wins just by using more cores, e.g. PostgreSQL's parallel scans), and a database that runs out of memory (e.g. Redis with 10M transactions) is stopped by Docker instead of freezing the machine. Redis additionally runs with `maxmemory 5gb` and `noeviction`: when full, writes fail with an error instead of the container being killed. The engines also get comparable cache settings (`COMMANDS` in `zbd/docker.py`): MySQL `innodb_buffer_pool_size=3G` (the default 128 MB made 10M-row JOINs ~140x slower than at 1M, because the data no longer fit in memory), PostgreSQL `shared_buffers=1536MB` + `effective_cache_size=4GB`; MongoDB (WiredTiger takes ~50% of the container by default) and Redis (`maxmemory`) are left as they are.
+
+The limits and settings are applied when a container is created: containers created earlier have other ones: `uv run main.py` warns about them and `benchmark.py` refuses to measure (`--allow-wrong-limits` overrides), recreate them with the `docker rm -f` command below. **Results measured under different limits or settings must not be mixed in one `runs.csv`.**
 
 Running it again is safe: existing containers are restarted, not recreated.
 To remove the containers: `docker rm -f zbd-postgres zbd-mysql zbd-mongodb zbd-redis`.
