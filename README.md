@@ -116,12 +116,12 @@ uv run benchmark.py --sizes 100000 --runs 1              # quick check
 uv run benchmark.py --sizes 100000 --dbs postgres mongodb
 uv run benchmark.py --timeout 600 --load-timeout 3600    # seconds per scenario / for the bulk load
 uv run benchmark.py --no-isolate                         # keep all containers running (default: only the measured one)
-uv run benchmark.py --pause 30                           # seconds of rest between databases (default 15, 0 = none)
+uv run benchmark.py --pause 30                           # seconds of rest between databases (default 60, 0 = none)
 uv run benchmark.py --client-memory-gb 2                 # kill a scenario whose Python process exceeds 2 GB (default 3)
 uv run python -m zbd.scenarios --size 1000000           # show the parameters the scenarios use
 ```
 
-- Databases are measured one after another, never in parallel, with a pause (`--pause`, default 15 s) before each run that follows another database's run. While one database is measured, the containers of the others are stopped (frees RAM for 10M rows, adds a few seconds per run and database) and all are started again at the end; `--no-isolate` turns this off.
+- Databases are measured one after another, never in parallel, with a pause (`--pause`, default 60 s) before each run that follows another database's run. While one database is measured, the containers of the others are stopped (frees RAM for 10M rows, adds a few seconds per run and database) and all are started again at the end; `--no-isolate` turns this off.
 - Every scenario runs in its own process: a scenario that takes longer than `--timeout` is recorded as `timeout`, one whose Python process exceeds `--client-memory-gb` or that is killed by the system as `oom`, an exception as `error`. A failed READ does not stop the run; a failed CREATE / UPDATE / DELETE makes the rest of the run `skipped`, because later results would not be comparable.
 - Results are appended to `results/runs.csv` (`size, run, database, scenario, operation, difficulty, seconds, rows, status, digest`). Finished (database, size, run) triples are skipped, so an interrupted benchmark can be started again with the same arguments.
 - Ids, filters and new rows are derived from the data (`Params` in `zbd/scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.

@@ -53,13 +53,13 @@ COPY customers    (customer_id, ...) FROM STDIN;
 COPY products     (product_id, ...)  FROM STDIN;
 COPY transactions (transaction_id, ...) FROM STDIN;
 CREATE INDEX ON transactions (customer_id);
-CREATE INDEX ON transactions (product_id);
 CREATE INDEX ON transactions (transaction_date);
--- MySQL: wielowierszowy INSERT po 10 000 wierszy
+-- MySQL: wielowierszowy INSERT po 10 000 wierszy; indeks po dacie po załadowaniu, potem ANALYZE TABLE;
+-- indeksy kluczy obcych (customer_id, product_id) InnoDB tworzy sam od początku
 ```
 
-- **MongoDB:** `insert_many(ordered=False)` paczkami po 50 000 + 3 indeksy na `transactions`.
-- **Redis:** Pipeline: `HSET` + `SADD` / `ZADD` (5 indeksów na transakcję).
+- **MongoDB:** `insert_many(ordered=False)` paczkami po 50 000 + 2 indeksy na `transactions` (`customer_id`, `transaction_date`).
+- **Redis:** Pipeline: `HSET` + `SADD` / `ZADD` (3 indeksy na transakcję: klient, kanał, data).
 
 ## 2. Odczyt po kluczu głównym (×1000)
 
@@ -127,7 +127,7 @@ GROUP BY p.category
 ORDER BY revenue DESC, p.category;
 ```
 
-- **MongoDB:** `$lookup` na `products` + `$unwind` + `$group`.
+- **MongoDB:** `$group` po `product_id` (120 grup) → `$lookup` na `products` + `$unwind` → `$group` po kategorii.
 - **Redis:** Wszystkie transakcje (`ZRANGE idx:tx:date`) → `HMGET`; kategoria ze słownika produktów, agregacja w kliencie.
 
 ## 6. Top 10 produktów wg przychodu

@@ -10,7 +10,7 @@ own child process, so a scenario can be stopped after --timeout seconds ("timeou
 ("oom") without stopping the benchmark. If a scenario that changes data fails, the rest of the run is
 "skipped" (later results would not be comparable); a failed READ does not stop the run.
 
-Between two runs on different databases the benchmark rests for --pause seconds (default 15).
+Between two runs on different databases the benchmark rests for --pause seconds (default 60).
 Only the container of the measured database runs (the others are stopped, and all are started again at the
 end); --no-isolate keeps all of them running.
 
@@ -224,9 +224,9 @@ def main():
                              "under different container limits apart")
     parser.add_argument("--allow-wrong-limits", action="store_true",
                         help="measure even if an existing container has other memory / cpu limits than zbd/docker.py")
-    parser.add_argument("--pause", type=int, default=15,
+    parser.add_argument("--pause", type=int, default=60,
                         help="seconds of rest before each run on a database that follows another one "
-                             "(default: 15, 0 = none)")
+                             "(default: 60, 0 = none)")
     parser.add_argument("--client-memory-gb", type=float, default=3.0,
                         help="kill a scenario whose Python process uses more memory than this (default: 3, 0 = off)")
     parser.add_argument("--isolate", action=argparse.BooleanOptionalAction, default=True,

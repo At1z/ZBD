@@ -60,9 +60,13 @@ def aggregate(db, pipeline):
 
 
 def medium(db):
+    # Group by product_id first (120 groups), join the small products collection on the groups only, then group by
+    # category. Same result as joining every transaction, but 10M $lookup stages become 120 (the way S06 does it).
     rows = aggregate(db, [
-        *lookup("products", "product_id", "product"),
-        {"$group": {"_id": "$product.category", "n": {"$sum": 1}, "revenue": {"$sum": "$sales_amount"},
+        {"$group": {"_id": "$product_id", "n": {"$sum": 1}, "revenue": {"$sum": "$sales_amount"},
+                    "quantity": {"$sum": "$quantity"}}},
+        *lookup("products", "_id", "product"),
+        {"$group": {"_id": "$product.category", "n": {"$sum": "$n"}, "revenue": {"$sum": "$revenue"},
                     "quantity": {"$sum": "$quantity"}}},
         {"$sort": {"revenue": -1, "_id": 1}},
     ])
