@@ -4,7 +4,7 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent  # project root (this file is in zbd/)
 DATA_DIR = ROOT / "data"
 KAGGLE_DIR = DATA_DIR / "kaggle"
 KAGGLE_URL = "https://www.kaggle.com/api/v1/datasets/download/noopurbhatt/retail-sales-dataset"

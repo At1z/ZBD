@@ -10,7 +10,7 @@ in small caches.
 """
 from datetime import date
 
-import connections
+from zbd import connections
 
 DATE_INDEX = "idx:tx:date"   # sorted set: member = transaction id, score = date ordinal
 PAGE = 50_000                # ids read from an index at once

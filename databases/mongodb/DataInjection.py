@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pymongo.errors import PyMongoError
 
-import connections
+from zbd import connections
 
 BATCH_SIZE = 50_000
 

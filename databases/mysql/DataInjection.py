@@ -1,7 +1,7 @@
 import pymysql
 
-import connections
-from dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
+from zbd import connections
+from zbd.dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
 
 BATCH_SIZE = 10_000
 

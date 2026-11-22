@@ -1,7 +1,7 @@
 import psycopg
 
-import connections
-from dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
+from zbd import connections
+from zbd.dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
 
 SCHEMA = """
 DROP TABLE IF EXISTS transactions, products, customers CASCADE;

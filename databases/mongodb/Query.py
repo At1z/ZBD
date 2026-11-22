@@ -7,7 +7,7 @@ Writes use the driver defaults (acknowledged, no journal wait), like the other d
 """
 from datetime import datetime
 
-import connections
+from zbd import connections
 
 BATCH = 1000          # ids per update_many in S15
 INSERT_BATCH = 5000   # documents per insert_many

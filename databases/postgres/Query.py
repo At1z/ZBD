@@ -1,18 +1,17 @@
-"""MySQL implementation of scenarios S02..S24 (see SCENARIOS.md; S01 is DataInjection.inject).
+"""PostgreSQL implementation of scenarios S02..S24 (see SCENARIOS.md; S01 is DataInjection.inject).
 
 Contract used by benchmark.py: connect() -> ctx, disconnect(ctx), SCENARIOS = {id: fn(ctx, params)}.
 A scenario returns a list of tuples (READ) or the number of affected rows (CREATE / UPDATE / DELETE).
 Changes are committed inside the scenario, so the commit is part of the measured time.
-Every UPDATE here changes the value (x + 1), so MySQL's "changed rows" equals the matched rows.
 """
 from decimal import Decimal
 
-import connections
-from dataset import TRANSACTION_COLUMNS
+from zbd import connections
+from zbd.dataset import TRANSACTION_COLUMNS
 
-BATCH = 1000          # ids per statement in the batched UPDATE
-INSERT_BATCH = 5000   # rows per executemany (pymysql turns it into one multi-row INSERT)
+BATCH = 1000  # ids per statement in the batched UPDATE
 
+# one row of `transactions` in the order of TRANSACTION_COLUMNS (sales_amount is at index SALES_AMOUNT)
 ROW_COLUMNS = ", ".join(TRANSACTION_COLUMNS)
 SALES_AMOUNT = TRANSACTION_COLUMNS.index("sales_amount")
 INSERT = f"INSERT INTO transactions ({ROW_COLUMNS}) VALUES ({', '.join(['%s'] * len(TRANSACTION_COLUMNS))})"
@@ -31,7 +30,7 @@ SELECT c.customer_segment, p.category, t.region, COUNT(*) AS n,
 FROM transactions t
 JOIN customers c USING (customer_id)
 JOIN products p USING (product_id)
-WHERE t.transaction_date >= %s
+WHERE t.transaction_date >= %s::date
 GROUP BY c.customer_segment, p.category, t.region
 HAVING SUM(t.sales_amount) > 1000
 ORDER BY revenue DESC, c.customer_segment, p.category, t.region
@@ -40,7 +39,7 @@ LIMIT 20
 
 
 def connect():
-    return connections.mysql()
+    return connections.postgres()
 
 
 def disconnect(conn):
@@ -48,9 +47,7 @@ def disconnect(conn):
 
 
 def fetch(conn, sql, args=None):
-    with conn.cursor() as cur:
-        cur.execute(sql, args)
-        return list(cur.fetchall())
+    return conn.execute(sql, args).fetchall()
 
 
 def read_by_key(conn, ids):
@@ -58,8 +55,7 @@ def read_by_key(conn, ids):
     found, total = 0, Decimal(0)
     with conn.cursor() as cur:
         for tid in ids:
-            cur.execute(f"SELECT {ROW_COLUMNS} FROM transactions WHERE transaction_id = %s", (tid,))
-            row = cur.fetchone()
+            row = cur.execute(f"SELECT {ROW_COLUMNS} FROM transactions WHERE transaction_id = %s", (tid,)).fetchone()
             if row:
                 found += 1
                 total += row[SALES_AMOUNT]
@@ -71,20 +67,15 @@ def execute_each(conn, sql, args_list):
     affected = 0
     with conn.cursor() as cur:
         for args in args_list:
-            affected += cur.execute(sql, args)
+            affected += cur.execute(sql, args).rowcount
     conn.commit()
     return affected
 
 
 def execute_once(conn, sql, args):
-    with conn.cursor() as cur:
-        affected = cur.execute(sql, args)
+    affected = conn.execute(sql, args).rowcount
     conn.commit()
     return affected
-
-
-def row_values(row):
-    return [row[c] for c in TRANSACTION_COLUMNS]
 
 
 # READ
@@ -106,7 +97,7 @@ def s03(conn, p):
 def s04(conn, p):
     return fetch(conn, """
         SELECT COUNT(*) FROM transactions
-        WHERE transaction_date >= %s AND transaction_date < %s
+        WHERE transaction_date >= %s::date AND transaction_date < %s::date
     """, (p.count_start, p.count_end))
 
 
@@ -135,13 +126,12 @@ def s07(conn, p):
     rows, names = 0, set()
     with conn.cursor() as cur:
         for customer_id in p.customer_ids:
-            cur.execute("""
+            for _, name in cur.execute("""
                 SELECT t.transaction_id, p.product_name
                 FROM transactions t
                 JOIN products p USING (product_id)
                 WHERE t.customer_id = %s
-            """, (customer_id,))
-            for _, name in cur.fetchall():
+            """, (customer_id,)).fetchall():
                 rows += 1
                 names.add(name)
     return [(rows, len(names))]
@@ -153,7 +143,7 @@ def s08(conn, p):
         FROM transactions t
         JOIN customers c USING (customer_id)
         JOIN products p USING (product_id)
-        WHERE t.transaction_date >= %s
+        WHERE t.transaction_date >= %s::date
         GROUP BY c.customer_segment, p.category, t.region
         HAVING SUM(t.sales_amount) > 1000
         ORDER BY revenue DESC, c.customer_segment, p.category, t.region
@@ -163,7 +153,7 @@ def s08(conn, p):
 
 def s09(conn, p):
     return fetch(conn, """
-        SELECT EXTRACT(YEAR FROM t.transaction_date) AS y, EXTRACT(MONTH FROM t.transaction_date) AS m,
+        SELECT EXTRACT(YEAR FROM t.transaction_date)::int AS y, EXTRACT(MONTH FROM t.transaction_date)::int AS m,
                p.category, c.customer_age_group, SUM(t.sales_amount) AS revenue
         FROM transactions t
         JOIN customers c USING (customer_id)
@@ -200,6 +190,10 @@ def s23(conn, p):
 
 # CREATE
 
+def row_values(row):
+    return [row[c] for c in TRANSACTION_COLUMNS]
+
+
 def s10(conn, p):
     return execute_each(conn, INSERT, [row_values(r) for r in p.new_single])
 
@@ -207,8 +201,9 @@ def s10(conn, p):
 def s11(conn, p):
     inserted = 0
     with conn.cursor() as cur:
-        for i in range(0, len(p.new_batch), INSERT_BATCH):
-            inserted += cur.executemany(INSERT, [row_values(r) for r in p.new_batch[i:i + INSERT_BATCH]])
+        for i in range(0, len(p.new_batch), 5000):
+            cur.executemany(INSERT, [row_values(r) for r in p.new_batch[i:i + 5000]])
+            inserted += cur.rowcount
     conn.commit()
     return inserted
 
@@ -223,23 +218,14 @@ def s13(conn, p):
 def s14(conn, p):
     return execute_once(conn, """
         UPDATE transactions SET discount_pct = discount_pct + 1
-        WHERE region = %s AND transaction_date >= %s AND transaction_date < %s
+        WHERE region = %s AND transaction_date >= %s::date AND transaction_date < %s::date
     """, (p.region, p.update_start, p.update_end))
 
 
 def s15(conn, p):
-    batches = [p.update_ids[i:i + BATCH] for i in range(0, len(p.update_ids), BATCH)]
-    return execute_each_in(conn, "UPDATE transactions SET quantity = quantity + 1 WHERE transaction_id IN ({})", batches)
-
-
-def execute_each_in(conn, sql_template, batches):
-    """Like execute_each, for statements with an `IN (...)` list sized to each batch."""
-    affected = 0
-    with conn.cursor() as cur:
-        for batch in batches:
-            affected += cur.execute(sql_template.format(", ".join(["%s"] * len(batch))), batch)
-    conn.commit()
-    return affected
+    return execute_each(
+        conn, "UPDATE transactions SET quantity = quantity + 1 WHERE transaction_id = ANY(%s)",
+        [(p.update_ids[i:i + BATCH],) for i in range(0, len(p.update_ids), BATCH)])
 
 
 # DELETE
@@ -252,12 +238,12 @@ def s18(conn, p):
 def s19(conn, p):
     return execute_once(conn, """
         DELETE FROM transactions
-        WHERE region = %s AND transaction_date >= %s AND transaction_date < %s
+        WHERE region = %s AND transaction_date >= %s::date AND transaction_date < %s::date
     """, (p.region, p.delete_start, p.delete_end))
 
 
 def s20(conn, p):
-    return execute_once(conn, "DELETE FROM transactions WHERE transaction_date < %s", (p.cutoff_date,))
+    return execute_once(conn, "DELETE FROM transactions WHERE transaction_date < %s::date", (p.cutoff_date,))
 
 
 TABLES = ["transactions", "products", "customers"]  # children first (foreign keys)
@@ -265,15 +251,10 @@ TABLES = ["transactions", "products", "customers"]  # children first (foreign ke
 
 def s24(conn, p):
     """Delete every row from all 3 tables. Returns the number of rows left (must be 0)."""
-    with conn.cursor() as cur:
-        for table in TABLES:
-            cur.execute(f"DELETE FROM {table}")
-        conn.commit()
-        left = 0
-        for table in TABLES:
-            cur.execute(f"SELECT COUNT(*) FROM {table}")
-            left += cur.fetchone()[0]
-    return left
+    for table in TABLES:
+        conn.execute(f"DELETE FROM {table}")
+    conn.commit()
+    return sum(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES)
 
 
 SCENARIOS = {

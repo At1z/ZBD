@@ -27,9 +27,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-from dataset import ROOT  # noqa: E402
+from zbd.dataset import ROOT  # noqa: E402
 from main import DATABASES  # noqa: E402
-from scenarios import SCENARIOS  # noqa: E402
+from zbd.scenarios import SCENARIOS  # noqa: E402
 
 DEFAULT_CSV = ROOT / "results" / "runs.csv"
 DEFAULT_OUT = ROOT / "results" / "report"

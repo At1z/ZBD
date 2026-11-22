@@ -2,7 +2,7 @@ from datetime import date
 
 import redis
 
-import connections
+from zbd import connections
 
 BATCH_SIZE = 10_000
 

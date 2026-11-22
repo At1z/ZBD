@@ -6,24 +6,27 @@ A project for working with four databases, each running in its own Docker contai
 
 ```
 ZBD/
-├── main.py            # runs initDB for every database and loads the dataset
+├── main.py            # starts every container and loads the full dataset
 ├── benchmark.py       # runs the 24 scenarios on every database (runs, timeouts, CSV)
-├── scenarios.py       # the 24 scenarios and their shared parameters
-├── SCENARIOS.md       # description of every scenario (generated)
 ├── report.py          # tables and charts from results/runs.csv
-├── connections.py     # connection factories shared by all databases
 ├── pyproject.toml     # dependencies (uv)
 ├── uv.lock            # pinned dependency versions (commit it)
-├── docker_utils.py    # shared helper that starts a container
-├── dataset.py         # RetailDataset: downloads, splits into 3 tables, replicates x10
-├── data/              # generated CSVs + Kaggle source (git-ignored)
-├── postgres/
-│   ├── initDB.py          # starts the container
-│   ├── DataInjection.py   # CREATE: schema + data insertion, check() health query
-│   └── Query.py           # READ / UPDATE / DELETE: simple(), medium(), heavy(), update(), delete_all()
-├── mysql/      (same files)
-├── mongodb/    (same files)
-└── redis/      (same files)
+├── SCENARIOS.md       # description of every scenario (generated)
+├── zbd/               # shared code (package)
+│   ├── connections.py     # connection factories shared by all databases
+│   ├── docker.py          # starts / stops containers (memory limit, health checks)
+│   ├── dataset.py         # RetailDataset: downloads, splits into 3 tables, replicates
+│   └── scenarios.py       # the 24 scenarios and their shared parameters
+├── databases/
+│   ├── postgres/
+│   │   ├── initDB.py          # starts the container
+│   │   ├── DataInjection.py   # CREATE (S01): schema + data insertion, check() health query
+│   │   └── Query.py           # scenarios S02..S24
+│   ├── mysql/      (same files)
+│   ├── mongodb/    (same files)
+│   └── redis/      (same files)
+├── data/              # Kaggle source and generated CSVs (git-ignored)
+└── results/           # runs.csv (git-ignored) and report/ (tables, charts)
 ```
 
 ## Usage
@@ -46,7 +49,7 @@ Dependencies (managed in `pyproject.toml`): `psycopg`, `pymysql`, `pymongo`, `re
 
 Exact versions are pinned on purpose, so benchmark results stay comparable over time. After changing a version, remove the old container (`docker rm -f ...` below), otherwise the old image keeps running.
 
-Every container has the same hard limit of **6 GB RAM** (`--memory=6g --memory-swap=6g`, see `MEMORY_LIMIT` in `docker_utils.py`), so the comparison is fair and a database that runs out of memory (e.g. Redis with 10M transactions) is stopped by Docker instead of freezing the machine. Redis additionally runs with `maxmemory 5gb` and `noeviction`: when full, writes fail with an error instead of the container being killed. The limit is set when a container is created: containers created earlier have none, `uv run main.py` warns about them, recreate them with the `docker rm -f` command below.
+Every container has the same hard limit of **6 GB RAM** (`--memory=6g --memory-swap=6g`, see `MEMORY_LIMIT` in `zbd/docker.py`), so the comparison is fair and a database that runs out of memory (e.g. Redis with 10M transactions) is stopped by Docker instead of freezing the machine. Redis additionally runs with `maxmemory 5gb` and `noeviction`: when full, writes fail with an error instead of the container being killed. The limit is set when a container is created: containers created earlier have none, `uv run main.py` warns about them, recreate them with the `docker rm -f` command below.
 
 Running it again is safe: existing containers are restarted, not recreated.
 To remove the containers: `docker rm -f zbd-postgres zbd-mysql zbd-mongodb zbd-redis`.
@@ -81,10 +84,10 @@ Note: containers created before health checks were added have none. Recreate the
 
 ## Dataset
 
-[Retail Sales Dataset (Kaggle)](https://www.kaggle.com/datasets/noopurbhatt/retail-sales-dataset): 120 000 rows, 17 columns. `dataset.py` (class `RetailDataset`) downloads it, splits it into 3 tables and replicates it 10 times, so we get ~1.2M transactions:
+[Retail Sales Dataset (Kaggle)](https://www.kaggle.com/datasets/noopurbhatt/retail-sales-dataset): 120 000 rows, 17 columns. `zbd/dataset.py` (class `RetailDataset`) downloads it, splits it into 3 tables and replicates it 10 times, so we get ~1.2M transactions:
 
 ```
-uv run dataset.py     # writes data/customers.csv, data/products.csv, data/transactions.csv
+uv run python -m zbd.dataset     # writes data/customers.csv, data/products.csv, data/transactions.csv
 ```
 
 | Table          | Rows (x10)  | Columns |
@@ -101,7 +104,7 @@ uv run dataset.py     # writes data/customers.csv, data/products.csv, data/trans
 
 ## Benchmark
 
-24 scenarios (8 easy, 8 medium, 8 heavy; 3 CREATE, 14 READ, 3 UPDATE, 4 DELETE), identical for every database. The full list with the query of each scenario is in [SCENARIOS.md](SCENARIOS.md) (generated from `scenarios.py`: `uv run scenarios.py --markdown`).
+24 scenarios (8 easy, 8 medium, 8 heavy; 3 CREATE, 14 READ, 3 UPDATE, 4 DELETE), identical for every database. The full list with the query of each scenario is in [SCENARIOS.md](SCENARIOS.md) (generated from `zbd/scenarios.py`: `uv run python -m zbd.scenarios --markdown`).
 
 One **run** = S01..S24 in a fixed order on one database (S01 loads the data, S24 deletes it). Every size is repeated 3 times, so 3 sizes x 3 runs = 9 runs per database:
 
@@ -113,13 +116,13 @@ uv run benchmark.py --timeout 600 --load-timeout 3600    # seconds per scenario 
 uv run benchmark.py --no-isolate                         # keep all containers running (default: only the measured one)
 uv run benchmark.py --pause 30                           # seconds of rest between databases (default 15, 0 = none)
 uv run benchmark.py --client-memory-gb 2                 # kill a scenario whose Python process exceeds 2 GB (default 3)
-uv run scenarios.py --size 1000000                       # show the parameters the scenarios use
+uv run python -m zbd.scenarios --size 1000000           # show the parameters the scenarios use
 ```
 
 - Databases are measured one after another, never in parallel, with a pause (`--pause`, default 15 s) before each run that follows another database's run. While one database is measured, the containers of the others are stopped (frees RAM for 10M rows, adds a few seconds per run and database) and all are started again at the end; `--no-isolate` turns this off.
 - Every scenario runs in its own process: a scenario that takes longer than `--timeout` is recorded as `timeout`, one whose Python process exceeds `--client-memory-gb` or that is killed by the system as `oom`, an exception as `error`. A failed READ does not stop the run; a failed CREATE / UPDATE / DELETE makes the rest of the run `skipped`, because later results would not be comparable.
 - Results are appended to `results/runs.csv` (`size, run, database, scenario, operation, difficulty, seconds, rows, status, digest`). Finished (database, size, run) triples are skipped, so an interrupted benchmark can be started again with the same arguments.
-- Ids, filters and new rows are derived from the data (`Params` in `scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.
+- Ids, filters and new rows are derived from the data (`Params` in `zbd/scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.
 - Each `Query.py` has to provide `connect()`, `disconnect(ctx)` and `SCENARIOS = {"S02": fn, ..., "S24": fn}` (S01 is `DataInjection.inject`). Note: the benchmark wipes the data in the databases, run `uv run main.py` afterwards to load the full dataset again.
 
 ## Report

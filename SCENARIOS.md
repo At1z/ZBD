@@ -1,13 +1,13 @@
 # Scenariusze testowe
 
 24 scenariusze wykonywane w tej samej kolejności na każdej bazie (PostgreSQL, MySQL, MongoDB, Redis).
-Ten plik jest generowany z `scenarios.py` (`uv run scenarios.py --markdown`), nie edytuj go ręcznie.
+Ten plik jest generowany z `zbd/scenarios.py` (`uv run python -m zbd.scenarios --markdown`), nie edytuj go ręcznie.
 
 - **Run** to jeden pełny przebieg S01–S24 dla jednego rozmiaru danych. Każdy rozmiar (100 000, 1 000 000,
   10 000 000 transakcji) jest powtarzany 3 razy, razem 9 runów na bazę.
 - Kolejność jest stała, bo scenariusze zależą od siebie: S01 ładuje dane, S10–S11 dokładają nowe rekordy,
   S13–S15 je zmieniają (S16–S17 pokazują skutek), S18–S20 usuwają (S21–S23 pokazują skutek), S24 sprząta.
-- Parametry (id, filtry, nowe rekordy) są liczone deterministycznie z danych (`Params` w `scenarios.py`),
+- Parametry (id, filtry, nowe rekordy) są liczone deterministycznie z danych (`Params` w `zbd/scenarios.py`),
   więc każda baza dostaje dokładnie to samo. Wyniki scenariuszy są porównywane między bazami.
 - Podział: 8 łatwych, 8 średnich, 8 trudnych. Typy: 3 × CREATE, 14 × READ, 3 × UPDATE, 4 × DELETE.
 - Zapytania poniżej są w kanonicznym SQL (Postgres); `:nazwa` to parametr z `Params`.

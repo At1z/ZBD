@@ -26,10 +26,10 @@ import time
 from collections import defaultdict
 from decimal import Decimal
 
-from dataset import ROOT, RetailDataset
-from docker_utils import stop_container
+from zbd.dataset import ROOT, RetailDataset
+from zbd.docker import stop_container
 from main import DATABASES, load_module
-from scenarios import SCENARIO_IDS, SCENARIOS, Params
+from zbd.scenarios import SCENARIO_IDS, SCENARIOS, Params
 
 RESULTS_CSV = ROOT / "results" / "runs.csv"
 COLUMNS = ["size", "run", "database", "scenario", "operation", "difficulty", "seconds", "rows", "status", "digest"]
