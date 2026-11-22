@@ -3,12 +3,15 @@
     uv run benchmark.py                                   # sizes 100000 1000000 10000000, 3 runs each
     uv run benchmark.py --sizes 100000 --runs 1           # quick check
     uv run benchmark.py --sizes 100000 --dbs postgres     # only some databases
-    uv run benchmark.py --isolate                         # only the measured database's container runs
+    uv run benchmark.py --no-isolate                      # keep all containers running (default: only the measured one)
 
 One run = S01..S24 in order on one database (S01 loads the data, S24 deletes it). Every scenario runs in its
 own child process, so a scenario can be stopped after --timeout seconds ("timeout") or killed by the system
 ("oom") without stopping the benchmark. If a scenario that changes data fails, the rest of the run is
 "skipped" (later results would not be comparable); a failed READ does not stop the run.
+
+Only the container of the measured database runs (the others are stopped, and all are started again at the
+end); --no-isolate keeps all of them running.
 
 Results are appended to results/runs.csv, one row per scenario. Finished (database, size, run) triples are
 skipped, so an interrupted benchmark can simply be started again with the same arguments.
@@ -216,9 +219,9 @@ def main():
     parser.add_argument("--load-timeout", type=int, default=7200, help="seconds for S01, the bulk load (default: 7200)")
     parser.add_argument("--client-memory-gb", type=float, default=3.0,
                         help="kill a scenario whose Python process uses more memory than this (default: 3, 0 = off)")
-    parser.add_argument("--isolate", action="store_true",
-                        help="stop the other databases' containers while one is measured (starts them again at "
-                             "the end); frees RAM for large sizes, adds a few seconds per run and database")
+    parser.add_argument("--isolate", action=argparse.BooleanOptionalAction, default=True,
+                        help="stop the other databases' containers while one is measured and start them again at "
+                             "the end (default: on; --no-isolate keeps all containers running)")
     args = parser.parse_args()
     try:
         run(args)
