@@ -6,7 +6,7 @@
 Tables
     per database  - rows: CREATE / READ / UPDATE / DELETE / SUM, columns: every size x runs 1..3 + best run
     per size      - rows: CREATE / READ / UPDATE / DELETE / SUM, columns: databases (best run), then all 24 scenarios
-    repeatability - per size: total of every run and the spread between runs
+    repeatability - per size: total of every run and the spread between runs (table + chart)
     appendix      - per database, all 24 scenarios in every run
 Charts
     per database  - best runs of every size compared (log scale)
@@ -320,6 +320,56 @@ def chart_scenarios(runs, size, dbs, out):
     return name
 
 
+def spread_percent(runs, db, size, run_numbers):
+    totals = [group_value(runs[(db, size, run)], "SUM") if (db, size, run) in runs else None for run in run_numbers]
+    complete = [t for t in totals if isinstance(t, float)]
+    spread = (max(complete) - min(complete)) / min(complete) * 100 if len(complete) >= 2 else None
+    return totals, spread
+
+
+def chart_repeatability(runs, size, dbs, out):
+    """Left: total of every run per database (equal bars = repeatable). Right: spread between the runs in %."""
+    run_numbers = sorted({run for (_, sz, run) in runs if sz == size})
+    n = len(run_numbers)
+    width = 0.8 / n
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.6), dpi=150, gridspec_kw={"width_ratios": [3, 2]})
+    style(fig, ax1, "y")
+    style(fig, ax2, "y")
+    data = {db: spread_percent(runs, db, size, run_numbers) for db in dbs}
+    top = max([t for totals, _ in data.values() for t in totals if isinstance(t, float)], default=1.0)
+    for j, db in enumerate(dbs):
+        totals, spread = data[db]
+        for i, total in enumerate(totals):
+            pos = j + (i - (n - 1) / 2) * width
+            color = SIZE_COLORS[min(i, len(SIZE_COLORS) - 1)]
+            if isinstance(total, float):
+                ax1.bar(pos, total, width=width * 0.86, color=color, edgecolor=SURFACE, linewidth=1)
+            elif isinstance(total, str):  # run did not finish
+                ax1.plot(pos, top * 0.03, marker="x", color=MUTED, markersize=5)
+                ax1.text(pos, top * 0.07, total, ha="center", fontsize=7, color=INK2)
+        if spread is not None:
+            ax2.bar(j, spread, width=0.55, color=DB_COLORS[db], edgecolor=SURFACE, linewidth=1)
+            ax2.text(j, spread + 0.15, f"{spread:.1f}%", ha="center", fontsize=9, color=INK2)
+    for ax in (ax1, ax2):
+        ax.set_xticks(range(len(dbs)))
+        ax.set_xticklabels([NAMES[db] for db in dbs], fontsize=9, color=INK2)
+    ax1.set_ylim(0, top * 1.1)
+    ax1.set_ylabel("sekundy (suma 24 scenariuszy)", color=INK2, fontsize=9)
+    ax1.set_title("Suma czasów w każdym runie", color=INK, fontsize=11, loc="left", pad=10)
+    ax2.set_ylim(0, max([s for _, s in data.values() if s is not None] + [5]) * 1.25)
+    ax2.set_ylabel("%", color=INK2, fontsize=9)
+    ax2.set_title("Rozrzut między runami: (max − min) / min", color=INK, fontsize=11, loc="left", pad=10)
+    fig.suptitle(f"{size:,}".replace(",", " ") + " transakcji: powtarzalność runów", color=INK, fontsize=12, x=0.01, ha="left")
+    fig.legend(handles=[Patch(facecolor=SIZE_COLORS[min(i, len(SIZE_COLORS) - 1)], label=f"run {run}")
+                        for i, run in enumerate(run_numbers)], frameon=False, fontsize=9, labelcolor=INK2,
+               ncol=n, loc="lower left", bbox_to_anchor=(0.06, 0.0))
+    fig.tight_layout(rect=(0, 0.07, 1, 0.94))
+    name = f"repeatability_{size}.png"
+    fig.savefig(out / name, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return name
+
+
 # ---------- report
 
 def build(csv_path, out):
@@ -356,7 +406,8 @@ def build(csv_path, out):
            "(największy − najmniejszy) / najmniejszy. Mały rozrzut znaczy, że różnice między bazami są większe niż "
            "szum pomiaru.", ""]
     for size in sizes:
-        md += [f"### {size:,}".replace(",", " ") + " transakcji", "", table_repeatability(runs, size, dbs), ""]
+        md += [f"### {size:,}".replace(",", " ") + " transakcji", "", table_repeatability(runs, size, dbs), "",
+               f"![powtarzalność {size_label(size)}]({chart_repeatability(runs, size, dbs, out)})", ""]
 
     md += ["## Załącznik: wszystkie scenariusze w każdym runie", ""]
     for db in dbs:

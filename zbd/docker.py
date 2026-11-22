@@ -1,10 +1,14 @@
 import subprocess
 import time
 
-# Every database gets the same hard limit, so the comparison is fair and a runaway database
+# Every database gets the same hard limits, so the comparison is fair and a runaway database
 # (e.g. Redis with 10M transactions) is killed by Docker instead of freezing the whole machine.
+# The CPU cap also keeps one database from winning just by using more cores (e.g. parallel scans in PostgreSQL)
+# and leaves the rest of the cores to the benchmark client and the system.
 MEMORY_LIMIT = "6g"
 MEMORY_LIMIT_BYTES = 6 * 1024**3
+CPU_LIMIT = "4"
+CPU_LIMIT_NANO = 4 * 10**9
 
 
 def docker(*args):
@@ -43,12 +47,23 @@ def stop_container(name):
         print(f"[{name}] stopped")
 
 
+def wrong_limits(name):
+    """A message when the existing container has other limits than MEMORY_LIMIT / CPU_LIMIT, else None
+    (also None when the container does not exist yet: it will be created with the right limits)."""
+    if not docker("ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Names}}"):
+        return None
+    memory, nano_cpus = docker("inspect", "--format", "{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}", name).split()
+    if memory == str(MEMORY_LIMIT_BYTES) and nano_cpus == str(CPU_LIMIT_NANO):
+        return None
+    return (f"[{name}] has memory limit {memory} bytes and cpu limit {nano_cpus} nano-cpus, "
+            f"expected {MEMORY_LIMIT} and {CPU_LIMIT} cpus. Recreate it: docker rm -f {name}")
+
+
 def warn_if_wrong_limit(name):
-    """Containers created before the limit existed (or with another one) are not comparable."""
-    value = docker("inspect", "--format", "{{.HostConfig.Memory}}", name)
-    if value != str(MEMORY_LIMIT_BYTES):
-        print(f"WARNING: [{name}] memory limit is {value} bytes, expected {MEMORY_LIMIT}. "
-              f"Recreate it: docker rm -f {name}")
+    """Containers created before the limits existed (or with other ones) are not comparable."""
+    message = wrong_limits(name)
+    if message:
+        print(f"WARNING: {message}")
 
 
 def run_container(name, image, ports, env=None, health_cmd=None, command=None):
@@ -78,6 +93,7 @@ def run_container(name, image, ports, env=None, health_cmd=None, command=None):
                 "--health-start-period", "10s",
             ]
         cmd += ["--memory", MEMORY_LIMIT, "--memory-swap", MEMORY_LIMIT]  # no swap inside the container
+        cmd += ["--cpus", CPU_LIMIT]
         cmd.append(image)
         cmd += command or []
         subprocess.run(cmd, check=True)

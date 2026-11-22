@@ -14,7 +14,7 @@ Between two runs on different databases the benchmark rests for --pause seconds 
 Only the container of the measured database runs (the others are stopped, and all are started again at the
 end); --no-isolate keeps all of them running.
 
-Results are appended to results/runs.csv, one row per scenario. Finished (database, size, run) triples are
+Results are appended to results/runs.csv (or --csv FILE), one row per scenario. Finished (database, size, run) triples are
 skipped, so an interrupted benchmark can simply be started again with the same arguments.
 """
 import argparse
@@ -24,10 +24,11 @@ import multiprocessing
 import os
 import time
 from collections import defaultdict
+from pathlib import Path
 from decimal import Decimal
 
 from zbd.dataset import ROOT, RetailDataset
-from zbd.docker import stop_container
+from zbd.docker import stop_container, wrong_limits
 from main import DATABASES, load_module
 from zbd.scenarios import SCENARIO_IDS, SCENARIOS, Params
 
@@ -158,15 +159,15 @@ def run_database(db, dataset, expected, params, timeout, load_timeout, memory_li
     return records, answers
 
 
-def completed_runs():
+def completed_runs(path):
     """(size, run, database) triples that already have all scenarios in the CSV."""
-    if not RESULTS_CSV.exists():
+    if not path.exists():
         return set()
     counts = defaultdict(int)
-    with open(RESULTS_CSV, newline="") as f:
+    with open(path, newline="") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames != COLUMNS:
-            raise SystemExit(f"{RESULTS_CSV} has a different format (old benchmark?). Move or delete it first.")
+            raise SystemExit(f"{path} has a different format (old benchmark?). Move or delete it first.")
         for row in reader:
             counts[(int(row["size"]), int(row["run"]), row["database"])] += 1
     return {key for key, n in counts.items() if n >= len(SCENARIOS)}
@@ -218,6 +219,11 @@ def main():
     parser.add_argument("--dbs", nargs="+", default=DATABASES, choices=DATABASES)
     parser.add_argument("--timeout", type=int, default=1800, help="seconds per scenario (default: 1800)")
     parser.add_argument("--load-timeout", type=int, default=7200, help="seconds for S01, the bulk load (default: 7200)")
+    parser.add_argument("--csv", type=Path, default=RESULTS_CSV,
+                        help="results file (default: results/runs.csv); use another file to keep results measured "
+                             "under different container limits apart")
+    parser.add_argument("--allow-wrong-limits", action="store_true",
+                        help="measure even if an existing container has other memory / cpu limits than zbd/docker.py")
     parser.add_argument("--pause", type=int, default=15,
                         help="seconds of rest before each run on a database that follows another one "
                              "(default: 15, 0 = none)")
@@ -238,14 +244,18 @@ def main():
 
 
 def run(args):
+    problems = [message for db in args.dbs if (message := wrong_limits(f"zbd-{db}"))]
+    if problems and not args.allow_wrong_limits:
+        raise SystemExit("Refusing to measure: results under different container limits are not comparable.\n  "
+                         + "\n  ".join(problems) + "\n(--allow-wrong-limits measures anyway)")
     if not args.isolate:
         for db in args.dbs:
             load_module(db, "initDB").init()
 
-    RESULTS_CSV.parent.mkdir(exist_ok=True)
-    done = completed_runs()
-    new_file = not RESULTS_CSV.exists()
-    with open(RESULTS_CSV, "a", newline="") as f:
+    args.csv.parent.mkdir(exist_ok=True)
+    done = completed_runs(args.csv)
+    new_file = not args.csv.exists()
+    with open(args.csv, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
         if new_file:
             writer.writeheader()
@@ -259,7 +269,7 @@ def run(args):
                 results, answers = {}, {}
                 for db in args.dbs:
                     if (size, run, db) in done:
-                        print(f"[{db}] {size:,} transactions, run {run}: already in {RESULTS_CSV.name}, skipping")
+                        print(f"[{db}] {size:,} transactions, run {run}: already in {args.csv.name}, skipping")
                         continue
                     print(f"\n[{db}] {size:,} transactions, run {run}", flush=True)
                     if args.isolate:
@@ -277,7 +287,7 @@ def run(args):
                 if results:
                     print_table(size, run, results)
                     compare(answers)
-    print(f"\nresults appended to {RESULTS_CSV}")
+    print(f"\nresults appended to {args.csv}")
 
 
 if __name__ == "__main__":
