@@ -88,9 +88,31 @@ class RetailDataset:
             return len(self.customers)
         return len({t["customer_id"] for t in self.transactions[:rows]})
 
+    def transaction_id_at(self, index):
+        """Id of the transaction at global position `index` (same order as iter_transactions)."""
+        if not self.transactions:
+            self.load()
+        copy, row = divmod(index, len(self.transactions))
+        return self._transaction_id(self.transactions[row]["transaction_id"], copy)
+
     def transaction_ids(self, every):
-        """Ids of every `every`-th transaction (used by the UPDATE step of the benchmark)."""
-        return [row["transaction_id"] for i, row in enumerate(self.iter_transactions()) if i % every == 0]
+        """Ids of every `every`-th transaction (computed by index, without iterating all rows)."""
+        return [self.transaction_id_at(i) for i in range(0, self.size, every)]
+
+    def base_rows(self):
+        """Source rows used by copy 0: the customers they reference always exist in every size."""
+        if not self.transactions:
+            self.load()
+        return self.transactions[:min(self.size, len(self.transactions))]
+
+    def copy0_customer_id(self, source_customer_id):
+        return self._customer_id(source_customer_id, 0)
+
+    def sample_customer_ids(self, count):
+        """`count` distinct, evenly spaced ids of customers that exist in the loaded data."""
+        ids = list(dict.fromkeys(row["customer_id"] for row in self.base_rows()))
+        count = min(count, len(ids))
+        return [self.copy0_customer_id(ids[i * len(ids) // count]) for i in range(count)]
 
     def _customer_id(self, customer_id, copy):
         return f"C{copy}{customer_id[1:]}"

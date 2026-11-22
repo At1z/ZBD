@@ -1,125 +1,215 @@
-"""CRUD benchmark: the same steps in every database, for one or more dataset sizes.
+"""Benchmark: the 24 scenarios of SCENARIOS.md on every database, for several sizes, several runs each.
 
-    uv run benchmark.py --sizes 10000 100000 1000000
+    uv run benchmark.py                                   # sizes 100000 1000000 10000000, 3 runs each
+    uv run benchmark.py --sizes 100000 --runs 1           # quick check
+    uv run benchmark.py --sizes 100000 --dbs postgres     # only some databases
 
-Steps per database and size:
-    CREATE  - DataInjection.inject (timed), verified with check()
-    READ    - Query.simple / medium / heavy (timed), results compared between databases
-    UPDATE  - Query.update: quantity + 1 on every 100th transaction (timed)
-    DELETE  - Query.delete_all: delete everything (timed), verified: nothing is left
+One run = S01..S24 in order on one database (S01 loads the data, S24 deletes it). Every scenario runs in its
+own child process, so a scenario can be stopped after --timeout seconds ("timeout") or killed by the system
+("oom") without stopping the benchmark. If a scenario that changes data fails, the rest of the run is
+"skipped" (later results would not be comparable); a failed READ does not stop the run.
 
-Run only some steps on already loaded data, e.g. 100 000 transactions:
-    uv run benchmark.py --sizes 100000 --steps create
-    uv run benchmark.py --sizes 100000 --steps read --repeat 3
-    uv run benchmark.py --sizes 100000 --steps update delete
+Results are appended to results/runs.csv, one row per scenario. Finished (database, size, run) triples are
+skipped, so an interrupted benchmark can simply be started again with the same arguments.
 """
 import argparse
 import csv
+import hashlib
+import multiprocessing
 import time
+from collections import defaultdict
 from decimal import Decimal
 
 from dataset import ROOT, RetailDataset
 from main import DATABASES, load_module
+from scenarios import SCENARIO_IDS, SCENARIOS, Params
 
-RESULTS_CSV = ROOT / "results" / "benchmark.csv"
-STEPS = ["create", "read", "update", "delete"]
-QUERIES = ["simple", "medium", "heavy"]
-
-
-def timed(fn, *args):
-    start = time.perf_counter()
-    result = fn(*args)
-    return result, time.perf_counter() - start
+RESULTS_CSV = ROOT / "results" / "runs.csv"
+COLUMNS = ["size", "run", "database", "scenario", "operation", "difficulty", "seconds", "rows", "status", "digest"]
+DEFAULT_SIZES = [100_000, 1_000_000, 10_000_000]
 
 
-def normalize(rows):
-    """Make rows comparable between databases (Decimal / float -> rounded int)."""
-    return [tuple(round(float(v)) if isinstance(v, (Decimal, float)) else v for v in row) for row in rows]
+def normalize(result):
+    """Make results comparable between databases (Decimal / float -> rounded int)."""
+    if isinstance(result, (list, tuple)):
+        return [tuple(round(float(v)) if isinstance(v, (Decimal, float)) else v for v in row) for row in result]
+    return result
 
 
-def run_database(db, dataset, expected, steps, update_every, repeat):
-    injection = load_module(db, "DataInjection")
+def digest(result):
+    if result is None:
+        return ""
+    return hashlib.sha1(repr(normalize(result)).encode()).hexdigest()[:10]
+
+
+def row_count(result, size):
+    if isinstance(result, (list, tuple)):
+        return len(result)
+    return size if result is None else int(result)  # S01 returns nothing: it loaded `size` transactions
+
+
+def _child(pipe, db, scenario_id, dataset, params):
+    """Runs one scenario and sends ("ok", seconds, result) or ("error", 0, message) through the pipe."""
+    try:
+        if scenario_id == "S01":
+            module = load_module(db, "DataInjection")
+            start = time.perf_counter()
+            module.inject(dataset)
+            seconds, result = time.perf_counter() - start, None
+        else:
+            query = load_module(db, "Query")
+            ctx = query.connect()  # opened outside the timed part
+            try:
+                start = time.perf_counter()
+                result = query.SCENARIOS[scenario_id](ctx, params)
+                seconds = time.perf_counter() - start
+            finally:
+                query.disconnect(ctx)
+        pipe.send(("ok", seconds, result))
+    except BaseException as error:
+        pipe.send(("error", 0.0, f"{type(error).__name__}: {error}"))
+    finally:
+        pipe.close()
+
+
+def run_scenario(db, scenario_id, dataset, params, timeout):
+    """Returns (status, seconds, result, message); status: ok | timeout | oom | error."""
+    context = multiprocessing.get_context("fork")  # the child reuses the loaded dataset without pickling it
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(target=_child, args=(sender, db, scenario_id, dataset, params), daemon=True)
+    process.start()
+    sender.close()
+    try:
+        if not receiver.poll(timeout):
+            process.kill()
+            process.join()
+            return "timeout", timeout, None, f"stopped after {timeout}s"
+        try:
+            kind, seconds, payload = receiver.recv()
+        except EOFError:  # the child died without answering
+            process.join()
+            if process.exitcode == -9:
+                return "oom", 0.0, None, "child killed (SIGKILL, probably out of memory)"
+            return "error", 0.0, None, f"child exited with code {process.exitcode}"
+        process.join()
+        if kind == "ok":
+            return "ok", seconds, payload, ""
+        return "error", 0.0, None, payload
+    finally:
+        receiver.close()
+        if process.is_alive():
+            process.kill()
+            process.join()
+
+
+def run_database(db, dataset, expected, params, timeout, load_timeout):
+    """One run on one database. Returns (records, answers); records are the CSV rows without size / run."""
     query = load_module(db, "Query")
-    results = []  # (operation, seconds, rows)
-    answers = {}
+    missing = [i for i in SCENARIO_IDS[1:] if i not in getattr(query, "SCENARIOS", {})]
+    if missing:
+        raise RuntimeError(f"[{db}] Query.py does not implement {', '.join(missing)} yet")
+    injection = load_module(db, "DataInjection")
 
-    if "create" in steps:
-        _, seconds = timed(injection.inject, dataset)
-        if not injection.check(expected, quiet=True):
-            raise RuntimeError(f"[{db}] CREATE finished but the data is incomplete")
-        results.append(("create", seconds, expected["transactions"]))
-
-    if "read" in steps:
-        for name in QUERIES:
-            times = []
-            for _ in range(repeat):
-                rows, seconds = timed(getattr(query, name))
-                times.append(seconds)
-            answers[name] = normalize(rows)
-            results.append((f"read_{name}", min(times), len(rows)))
-
-    if "update" in steps:
-        ids = dataset.transaction_ids(update_every)
-        updated, seconds = timed(query.update, ids)
-        if updated != len(ids):
-            raise RuntimeError(f"[{db}] UPDATE changed {updated} rows, expected {len(ids)}")
-        results.append(("update", seconds, updated))
-
-    if "delete" in steps:
-        left, seconds = timed(query.delete_all)
-        if left:
-            raise RuntimeError(f"[{db}] DELETE left {left} rows")
-        results.append(("delete", seconds, expected["transactions"]))
-    return results, answers
+    records, answers, aborted = [], {}, False
+    for s in SCENARIOS:
+        if aborted:
+            status, seconds, result, message = "skipped", 0.0, None, "an earlier scenario failed"
+        else:
+            status, seconds, result, message = run_scenario(
+                db, s.id, dataset, params, load_timeout if s.id == "S01" else timeout)
+            if status == "ok" and s.id == "S01" and not injection.check(expected, quiet=True):
+                status, message = "error", "data incomplete after loading"
+            if status != "ok" and s.operation != "READ":
+                aborted = True  # a failed change leaves the data in an unknown state
+        if status == "ok":
+            answers[s.id] = normalize(result)
+        records.append({
+            "scenario": s.id, "operation": s.operation, "difficulty": s.difficulty,
+            "seconds": f"{seconds:.4f}", "rows": row_count(result, dataset.size) if status == "ok" else "",
+            "status": status, "digest": digest(result) if status == "ok" else "",
+        })
+        print(f"  [{db}] {s.id} {s.name:<52} {status:<8} {seconds:>9.3f}s  {message}".rstrip(), flush=True)
+    return records, answers
 
 
-def print_table(size, table):
-    operations = [op for op, _, _ in next(iter(table.values()))]
-    print(f"\n=== {size:,} transactions (seconds) ===")
-    print(f"{'operation':<14}" + "".join(f"{db:>12}" for db in table))
-    for i, op in enumerate(operations):
-        print(f"{op:<14}" + "".join(f"{table[db][i][1]:>12.2f}" for db in table))
+def completed_runs():
+    """(size, run, database) triples that already have all scenarios in the CSV."""
+    if not RESULTS_CSV.exists():
+        return set()
+    counts = defaultdict(int)
+    with open(RESULTS_CSV, newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames != COLUMNS:
+            raise SystemExit(f"{RESULTS_CSV} has a different format (old benchmark?). Move or delete it first.")
+        for row in reader:
+            counts[(int(row["size"]), int(row["run"]), row["database"])] += 1
+    return {key for key, n in counts.items() if n >= len(SCENARIOS)}
+
+
+def print_table(size, run, results):
+    print(f"\n=== {size:,} transactions, run {run} (seconds) ===")
+    print(f"{'scenario':<10}" + "".join(f"{db:>12}" for db in results))
+    for i, s in enumerate(SCENARIOS):
+        cells = []
+        for db in results:
+            record = results[db][i]
+            cells.append(f"{float(record['seconds']):>12.3f}" if record["status"] == "ok" else f"{record['status']:>12}")
+        print(f"{s.id + ' ' + s.operation[:1]:<10}" + "".join(cells))
+
+
+def compare(answers):
+    """Warn when a scenario returned different results in different databases."""
+    for s in SCENARIOS:
+        reference = None
+        for db, per_scenario in answers.items():
+            if s.id not in per_scenario:
+                continue
+            if reference is None:
+                reference = (db, per_scenario[s.id])
+            elif per_scenario[s.id] != reference[1]:
+                print(f"WARNING: {s.id} result of {db} differs from {reference[0]}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--sizes", type=int, nargs="+", default=[10_000, 100_000, 1_000_000],
-                        help="number of transactions to create (default: 10000 100000 1000000)")
+    parser.add_argument("--sizes", type=int, nargs="+", default=DEFAULT_SIZES,
+                        help="number of transactions (default: 100000 1000000 10000000)")
+    parser.add_argument("--runs", type=int, default=3, help="runs per size and database (default: 3)")
     parser.add_argument("--dbs", nargs="+", default=DATABASES, choices=DATABASES)
-    parser.add_argument("--steps", nargs="+", default=STEPS, choices=STEPS,
-                        help="CRUD steps to run (default: all). Without create the data must already be loaded "
-                             "with the same --sizes value")
-    parser.add_argument("--update-every", type=int, default=100, help="update every N-th transaction")
-    parser.add_argument("--repeat", type=int, default=1, help="run each query N times, report the best")
+    parser.add_argument("--timeout", type=int, default=1800, help="seconds per scenario (default: 1800)")
+    parser.add_argument("--load-timeout", type=int, default=7200, help="seconds for S01, the bulk load (default: 7200)")
     args = parser.parse_args()
 
     for db in args.dbs:
         load_module(db, "initDB").init()
 
     RESULTS_CSV.parent.mkdir(exist_ok=True)
+    done = completed_runs()
     new_file = not RESULTS_CSV.exists()
     with open(RESULTS_CSV, "a", newline="") as f:
-        writer = csv.writer(f)
+        writer = csv.DictWriter(f, fieldnames=COLUMNS)
         if new_file:
-            writer.writerow(["size", "database", "operation", "seconds", "rows"])
+            writer.writeheader()
 
         for size in args.sizes:
             dataset = RetailDataset(size=size).load()
             expected = dataset.expected_counts()
-            table, answers = {}, {}
-            for db in args.dbs:
-                print(f"\n[{db}] {size:,} transactions ...", flush=True)
-                table[db], answers[db] = run_database(db, dataset, expected, args.steps, args.update_every, args.repeat)
-                for op, seconds, rows in table[db]:
-                    writer.writerow([size, db, op, f"{seconds:.3f}", rows])
-                f.flush()
-            print_table(size, table)
-
-            reference_db = args.dbs[0]
-            for db in args.dbs[1:]:
-                for name in answers[db]:
-                    if answers[db][name] != answers[reference_db][name]:
-                        print(f"WARNING: {name} result of {db} differs from {reference_db}")
+            params = Params(dataset)
+            for run in range(1, args.runs + 1):
+                results, answers = {}, {}
+                for db in args.dbs:
+                    if (size, run, db) in done:
+                        print(f"[{db}] {size:,} transactions, run {run}: already in {RESULTS_CSV.name}, skipping")
+                        continue
+                    print(f"\n[{db}] {size:,} transactions, run {run}", flush=True)
+                    records, answers[db] = run_database(db, dataset, expected, params, args.timeout, args.load_timeout)
+                    results[db] = records
+                    for record in records:
+                        writer.writerow({"size": size, "run": run, "database": db, **record})
+                    f.flush()
+                if results:
+                    print_table(size, run, results)
+                    compare(answers)
     print(f"\nresults appended to {RESULTS_CSV}")
 
 

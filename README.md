@@ -7,7 +7,9 @@ A project for working with four databases, each running in its own Docker contai
 ```
 ZBD/
 ├── main.py            # runs initDB for every database and loads the dataset
-├── benchmark.py       # CRUD benchmark across all databases
+├── benchmark.py       # runs the 24 scenarios on every database (runs, timeouts, CSV)
+├── scenarios.py       # the 24 scenarios and their shared parameters
+├── SCENARIOS.md       # description of every scenario (generated)
 ├── connections.py     # connection factories shared by all databases
 ├── pyproject.toml     # dependencies (uv)
 ├── uv.lock            # pinned dependency versions (commit it)
@@ -94,38 +96,24 @@ uv run dataset.py     # writes data/customers.csv, data/products.csv, data/trans
 - `RetailDataset(size=1_200_000, shift_years=0)`: `size` is the number of transactions (10 000, 100 000, 1 000 000, ...). The source is replicated as many times as needed and `customers` only holds customers referenced by those transactions. `shift_years` can shift transaction dates per copy.
 - `data/` and `*.csv` are in `.gitignore`.
 
-## CRUD benchmark
+## Benchmark
 
-Every database goes through the same steps (`uv run benchmark.py --sizes 10000 100000 1000000`):
+24 scenarios (8 easy, 8 medium, 8 heavy; 3 CREATE, 14 READ, 3 UPDATE, 4 DELETE), identical for every database. The full list with the query of each scenario is in [SCENARIOS.md](SCENARIOS.md) (generated from `scenarios.py`: `uv run scenarios.py --markdown`).
 
-| Step   | What happens | File |
-|--------|--------------|------|
-| CREATE | load N transactions (+ their customers and the 120 products), timed | `DataInjection.py` → `inject()` |
-| READ   | 3 queries: **simple** (1 table), **medium** (2 tables), **heavy** (3 tables) | `Query.py` → `simple()`, `medium()`, `heavy()` |
-| UPDATE | `quantity + 1` on every 100th transaction (returns the number of rows really changed; in Redis only existing hashes are touched) | `Query.py` → `update(ids)` |
-| DELETE | delete everything (SQL / Mongo: `DELETE`; Redis: `FLUSHDB`, so its time is not directly comparable) | `Query.py` → `delete_all()` |
-
-The queries are the same everywhere (SQL / `$lookup` / client-side join in Redis):
-
-| Query  | Tables | What it computes |
-|--------|--------|------------------|
-| simple | `transactions` | count and revenue per region for the `Online` channel |
-| medium | `transactions` + `products` | count and revenue per product category |
-| heavy  | `transactions` + `customers` + `products` | revenue per segment, category and region since 2025-01-01, groups above 1000, top 20 |
-
-Running operations on a chosen number of rows (`--sizes` = number of transactions; the steps share the same data, so use the same size in every call):
+One **run** = S01..S24 in a fixed order on one database (S01 loads the data, S24 deletes it). Every size is repeated 3 times, so 3 sizes x 3 runs = 9 runs per database:
 
 ```
-uv run benchmark.py --sizes 10000                          # full CRUD cycle on 10 000
-uv run benchmark.py --sizes 100000 --steps create          # only load 100 000
-uv run benchmark.py --sizes 100000 --steps read --repeat 3 # only the 3 queries, best of 3
-uv run benchmark.py --sizes 100000 --steps update          # only update every 100th
-uv run benchmark.py --sizes 100000 --steps delete          # only delete everything
-uv run benchmark.py --sizes 10000 100000 1000000           # whole cycle for three sizes in a row
-uv run benchmark.py --sizes 100000 --dbs postgres mongodb  # only some databases
+uv run benchmark.py                                      # sizes 100000 1000000 10000000, 3 runs each
+uv run benchmark.py --sizes 100000 --runs 1              # quick check
+uv run benchmark.py --sizes 100000 --dbs postgres mongodb
+uv run benchmark.py --timeout 600 --load-timeout 3600    # seconds per scenario / for the bulk load
+uv run scenarios.py --size 1000000                       # show the parameters the scenarios use
 ```
 
-Options: `--dbs postgres mongodb` (subset), `--update-every 100`, `--repeat 3` (best of N for queries). Results are printed and appended to `results/benchmark.csv`. The benchmark also compares query results between databases and prints a warning if they differ. Note: it wipes the data in the databases (DELETE step), run `uv run main.py` afterwards to load the full dataset again.
+- Every scenario runs in its own process: a scenario that takes longer than `--timeout` is recorded as `timeout`, one killed by the system as `oom`, an exception as `error`. A failed READ does not stop the run; a failed CREATE / UPDATE / DELETE makes the rest of the run `skipped`, because later results would not be comparable.
+- Results are appended to `results/runs.csv` (`size, run, database, scenario, operation, difficulty, seconds, rows, status, digest`). Finished (database, size, run) triples are skipped, so an interrupted benchmark can be started again with the same arguments.
+- Ids, filters and new rows are derived from the data (`Params` in `scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.
+- Each `Query.py` has to provide `connect()`, `disconnect(ctx)` and `SCENARIOS = {"S02": fn, ..., "S24": fn}` (S01 is `DataInjection.inject`). Note: the benchmark wipes the data in the databases, run `uv run main.py` afterwards to load the full dataset again.
 
 ## Files in each database folder
 
