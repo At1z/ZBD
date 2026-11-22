@@ -7,15 +7,25 @@ MEMORY_LIMIT = "5g"
 MEMORY_LIMIT_BYTES = 5 * 1024**3
 
 
+def docker(*args):
+    """Run a docker command and return its output. On failure the error carries docker's own message
+    (e.g. daemon not running, permission denied), not just an exit status."""
+    try:
+        result = subprocess.run(["docker", *args], capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError("`docker` not found: is Docker installed and on PATH?") from None
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise RuntimeError(f"`docker {' '.join(args)}` failed (exit {result.returncode}): {message}")
+    return result.stdout.strip()
+
+
 def wait_until_healthy(name, timeout=120):
     """Block until the container's health check reports healthy."""
     deadline = time.time() + timeout
     status = "unknown"
     while time.time() < deadline:
-        status = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Health.Status}}", name],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
+        status = docker("inspect", "--format", "{{.State.Health.Status}}", name)
         if status == "healthy":
             print(f"[{name}] healthy")
             return
@@ -27,21 +37,15 @@ def wait_until_healthy(name, timeout=120):
 
 def stop_container(name):
     """Stop the container if it is running (its data stays, `docker start` brings it back)."""
-    running = subprocess.run(
-        ["docker", "ps", "--filter", f"name=^{name}$", "--format", "{{.Names}}"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    running = docker("ps", "--filter", f"name=^{name}$", "--format", "{{.Names}}")
     if running:
-        subprocess.run(["docker", "stop", name], check=True, capture_output=True)
+        docker("stop", name)
         print(f"[{name}] stopped")
 
 
 def warn_if_wrong_limit(name):
     """Containers created before the limit existed (or with another one) are not comparable."""
-    value = subprocess.run(
-        ["docker", "inspect", "--format", "{{.HostConfig.Memory}}", name],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    value = docker("inspect", "--format", "{{.HostConfig.Memory}}", name)
     if value != str(MEMORY_LIMIT_BYTES):
         print(f"WARNING: [{name}] memory limit is {value} bytes, expected {MEMORY_LIMIT}. "
               f"Recreate it: docker rm -f {name}")
@@ -52,10 +56,7 @@ def run_container(name, image, ports, env=None, health_cmd=None, command=None):
 
     If the container already exists, it is started again.
     """
-    existing = subprocess.run(
-        ["docker", "ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Status}}"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    existing = docker("ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Status}}")
 
     if existing.startswith("Up"):
         print(f"[{name}] already running")

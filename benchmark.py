@@ -227,7 +227,10 @@ def main():
         run(args)
     finally:
         if args.isolate:
-            restore_containers()
+            try:
+                restore_containers()
+            except Exception as error:  # do not hide the error that ended the benchmark
+                print(f"WARNING: could not start all containers again: {error}")
 
 
 def run(args):
