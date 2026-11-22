@@ -6,6 +6,7 @@
 Tables
     per database  - rows: CREATE / READ / UPDATE / DELETE / SUM, columns: every size x runs 1..3 + best run
     per size      - rows: CREATE / READ / UPDATE / DELETE / SUM, columns: databases (best run), then all 24 scenarios
+    repeatability - per size: total of every run and the spread between runs
     appendix      - per database, all 24 scenarios in every run
 Charts
     per database  - best runs of every size compared (log scale)
@@ -176,6 +177,19 @@ def table_scenarios(runs, size, dbs):
     return md_table(headers, rows)
 
 
+def table_repeatability(runs, size, dbs):
+    """Total of all 24 scenarios in every run and the spread between the complete runs: (max - min) / min."""
+    run_numbers = sorted({run for (_, sz, run) in runs if sz == size})
+    headers = ["Baza"] + [f"run {run}" for run in run_numbers] + ["rozrzut"]
+    rows = []
+    for db in dbs:
+        totals = [group_value(runs[(db, size, run)], "SUM") if (db, size, run) in runs else None for run in run_numbers]
+        complete = [t for t in totals if isinstance(t, float)]
+        spread = f"{(max(complete) - min(complete)) / min(complete) * 100:.0f}%" if len(complete) >= 2 else "–"
+        rows.append([NAMES[db]] + [fmt(t) for t in totals] + [spread])
+    return md_table(headers, rows)
+
+
 def table_appendix(runs, db, sizes):
     headers = ["#", "Scenariusz"]
     columns = []
@@ -336,6 +350,13 @@ def build(csv_path, out):
                "<details><summary>Wszystkie 24 scenariusze</summary>", "",
                table_scenarios(runs, size, dbs), "",
                f"![scenariusze {label}]({chart_scenarios(runs, size, dbs, out)})", "", "</details>", ""]
+
+    md += ["## Powtarzalność runów", "",
+           "Suma czasów wszystkich 24 scenariuszy w każdym runie (sekundy) i rozrzut między kompletnymi runami: "
+           "(największy − najmniejszy) / najmniejszy. Mały rozrzut znaczy, że różnice między bazami są większe niż "
+           "szum pomiaru.", ""]
+    for size in sizes:
+        md += [f"### {size:,}".replace(",", " ") + " transakcji", "", table_repeatability(runs, size, dbs), ""]
 
     md += ["## Załącznik: wszystkie scenariusze w każdym runie", ""]
     for db in dbs:
