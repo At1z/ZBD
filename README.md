@@ -107,9 +107,11 @@ uv run benchmark.py                                      # sizes 100000 1000000 
 uv run benchmark.py --sizes 100000 --runs 1              # quick check
 uv run benchmark.py --sizes 100000 --dbs postgres mongodb
 uv run benchmark.py --timeout 600 --load-timeout 3600    # seconds per scenario / for the bulk load
+uv run benchmark.py --isolate                            # stop the other containers while one database is measured
 uv run scenarios.py --size 1000000                       # show the parameters the scenarios use
 ```
 
+- Databases are measured one after another, never in parallel. `--isolate` also stops the other databases' containers during a measurement (frees RAM for 10M rows, adds a few seconds per run and database) and starts them all again at the end.
 - Every scenario runs in its own process: a scenario that takes longer than `--timeout` is recorded as `timeout`, one killed by the system as `oom`, an exception as `error`. A failed READ does not stop the run; a failed CREATE / UPDATE / DELETE makes the rest of the run `skipped`, because later results would not be comparable.
 - Results are appended to `results/runs.csv` (`size, run, database, scenario, operation, difficulty, seconds, rows, status, digest`). Finished (database, size, run) triples are skipped, so an interrupted benchmark can be started again with the same arguments.
 - Ids, filters and new rows are derived from the data (`Params` in `scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.

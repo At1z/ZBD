@@ -20,6 +20,17 @@ def wait_until_healthy(name, timeout=120):
     raise RuntimeError(f"[{name}] not healthy (status: {status}), see: docker logs {name}")
 
 
+def stop_container(name):
+    """Stop the container if it is running (its data stays, `docker start` brings it back)."""
+    running = subprocess.run(
+        ["docker", "ps", "--filter", f"name=^{name}$", "--format", "{{.Names}}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if running:
+        subprocess.run(["docker", "stop", name], check=True, capture_output=True)
+        print(f"[{name}] stopped")
+
+
 def run_container(name, image, ports, env=None, health_cmd=None):
     """Run a container in the background and wait until it is healthy.
 

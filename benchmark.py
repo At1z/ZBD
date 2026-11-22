@@ -3,6 +3,7 @@
     uv run benchmark.py                                   # sizes 100000 1000000 10000000, 3 runs each
     uv run benchmark.py --sizes 100000 --runs 1           # quick check
     uv run benchmark.py --sizes 100000 --dbs postgres     # only some databases
+    uv run benchmark.py --isolate                         # only the measured database's container runs
 
 One run = S01..S24 in order on one database (S01 loads the data, S24 deletes it). Every scenario runs in its
 own child process, so a scenario can be stopped after --timeout seconds ("timeout") or killed by the system
@@ -21,6 +22,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 from dataset import ROOT, RetailDataset
+from docker_utils import stop_container
 from main import DATABASES, load_module
 from scenarios import SCENARIO_IDS, SCENARIOS, Params
 
@@ -170,6 +172,20 @@ def compare(answers):
                 print(f"WARNING: {s.id} result of {db} differs from {reference[0]}")
 
 
+def switch_to(db):
+    """--isolate: stop the other databases' containers and make sure only this one is running."""
+    for other in DATABASES:
+        if other != db:
+            stop_container(f"zbd-{other}")
+    load_module(db, "initDB").init()
+
+
+def restore_containers():
+    """Start every database again (the state main.py expects)."""
+    for db in DATABASES:
+        load_module(db, "initDB").init()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sizes", type=int, nargs="+", default=DEFAULT_SIZES,
@@ -178,10 +194,21 @@ def main():
     parser.add_argument("--dbs", nargs="+", default=DATABASES, choices=DATABASES)
     parser.add_argument("--timeout", type=int, default=1800, help="seconds per scenario (default: 1800)")
     parser.add_argument("--load-timeout", type=int, default=7200, help="seconds for S01, the bulk load (default: 7200)")
+    parser.add_argument("--isolate", action="store_true",
+                        help="stop the other databases' containers while one is measured (starts them again at "
+                             "the end); frees RAM for large sizes, adds a few seconds per run and database")
     args = parser.parse_args()
+    try:
+        run(args)
+    finally:
+        if args.isolate:
+            restore_containers()
 
-    for db in args.dbs:
-        load_module(db, "initDB").init()
+
+def run(args):
+    if not args.isolate:
+        for db in args.dbs:
+            load_module(db, "initDB").init()
 
     RESULTS_CSV.parent.mkdir(exist_ok=True)
     done = completed_runs()
@@ -202,6 +229,8 @@ def main():
                         print(f"[{db}] {size:,} transactions, run {run}: already in {RESULTS_CSV.name}, skipping")
                         continue
                     print(f"\n[{db}] {size:,} transactions, run {run}", flush=True)
+                    if args.isolate:
+                        switch_to(db)
                     records, answers[db] = run_database(db, dataset, expected, params, args.timeout, args.load_timeout)
                     results[db] = records
                     for record in records:
