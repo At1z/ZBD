@@ -146,7 +146,7 @@ Indexes: only the ones some scenario uses (transaction date, customer; Redis als
 
 MongoDB uses an embedded model: every transaction document carries the customer (segment, age group) and product (category, name) fields the scenarios need, so its queries need no `$lookup`; `customers` and `products` are still loaded as collections. The price shows in S01 (bigger documents) and in S10 / S11 (the fields to embed are read before inserting). The results are identical to the other databases (checked by the benchmark), only the data model differs.
 
-Redis has no joins or aggregation, so scenarios with joins / grouping read the transactions page by page (by rank in the date index, or with SSCAN) and aggregate in Python. Memory of the client stays flat whatever the size, but these scenarios are slow by nature.
+Redis has no joins or aggregation commands, so scenarios with joins / grouping (S03, S05, S06, S08, S09, S16, S17, S22, S23) use a Lua script that runs inside the server (`AGGREGATE` in `databases/redis/Query.py`): the client reads the transaction ids page by page (by rank in the date index, or with SSCAN), the script reads the hashes of the page, looks up customers / products and returns the partial groups, and the client merges the pages. Only ids go to the server and a few group rows come back, so client memory stays flat whatever the size. Aggregating inside the server is Redis's own way of doing a `GROUP BY` (the other databases do it in their query engine); the time is not comparable to a client-side aggregation.
 
 ## Resources
 

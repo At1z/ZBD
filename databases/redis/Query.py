@@ -3,11 +3,13 @@
 Contract used by benchmark.py: connect() -> ctx (the client), disconnect(ctx), SCENARIOS = {id: fn(ctx, params)}.
 A scenario returns a list of tuples (READ) or the number of affected hashes (CREATE / UPDATE / DELETE).
 
-Redis has no joins or aggregation, so they are done in the client. To keep the client's memory flat whatever
-the dataset size, transactions are never collected into one big list: ids are read page by page (by rank in
-the `idx:tx:date` sorted set, or with SSCAN) and aggregated on the fly. Customers and products are looked up
-in small caches.
+Redis has no joins or aggregation commands, so scenarios with grouping / joins use a Lua script that runs inside
+the server (AGGREGATE): the client reads the transaction ids page by page (by rank in the `idx:tx:date` sorted set,
+or with SSCAN), the script reads the hashes of that page, looks up customers / products and returns the partial
+groups, and the client merges the pages. Only ids go to the server and a few group rows come back, whatever
+the dataset size; a page keeps every script call short (well below the server's busy-script limit).
 """
+import json
 from datetime import date
 
 from zbd import connections
@@ -23,6 +25,78 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
     return 1
 end
 return 0
+"""
+
+# GROUP BY inside the server for one page of transaction ids.
+# ARGV[1] = mode, ARGV[2..] = transaction ids. Returns JSON: [[group key parts..., n, revenue, quantity], ...]
+# (revenue as a string with all digits of the double, so merging pages loses nothing; quantity 0 for modes that do not sum it). Customers and products are looked
+# up with HGET and cached for the duration of the call only, so memory stays small.
+AGGREGATE = r"""
+local mode = ARGV[1]
+local FIELDS = {
+    region  = {'region', 'sales_amount'},
+    medium  = {'product_id', 'sales_amount', 'quantity'},
+    product = {'product_id', 'sales_amount'},
+    heavy   = {'customer_id', 'product_id', 'region', 'sales_amount', 'quantity'},
+    age     = {'customer_id', 'product_id', 'transaction_date', 'sales_amount'},
+}
+local AMOUNT = {region = 2, medium = 2, product = 2, heavy = 4, age = 4}
+local QUANTITY = {medium = 3, heavy = 5}
+local fields, amount_at, quantity_at = FIELDS[mode], AMOUNT[mode], QUANTITY[mode]
+
+local products, customers = {}, {}
+local function lookup(cache, prefix, id, field)
+    local value = cache[id]
+    if value == nil then
+        value = redis.call('HGET', prefix .. id, field)
+        cache[id] = value
+    end
+    return value
+end
+
+local groups = {}
+for i = 2, #ARGV do
+    local f = redis.call('HMGET', 'transaction:' .. ARGV[i], unpack(fields))
+    if f[amount_at] then
+        local parts
+        if mode == 'region' or mode == 'product' then
+            parts = {f[1]}
+        elseif mode == 'medium' then
+            parts = {lookup(products, 'product:', f[1], 'category')}
+        elseif mode == 'heavy' then
+            parts = {lookup(customers, 'customer:', f[1], 'customer_segment'),
+                     lookup(products, 'product:', f[2], 'category'), f[3]}
+        else  -- age: year, month (YYYY-MM-DD), category, customer age group
+            parts = {tonumber(string.sub(f[3], 1, 4)), tonumber(string.sub(f[3], 6, 7)),
+                     lookup(products, 'product:', f[2], 'category'),
+                     lookup(customers, 'customer:', f[1], 'customer_age_group')}
+        end
+        local key = table.concat(parts, '\1')
+        local g = groups[key]
+        if g == nil then
+            g = {parts = parts, n = 0, revenue = 0, quantity = 0}
+            groups[key] = g
+        end
+        g.n = g.n + 1
+        g.revenue = g.revenue + tonumber(f[amount_at])
+        if quantity_at then
+            g.quantity = g.quantity + tonumber(f[quantity_at])
+        end
+    end
+end
+
+local rows = {}
+for _, g in pairs(groups) do
+    local row = {}
+    for _, part in ipairs(g.parts) do
+        row[#row + 1] = part
+    end
+    row[#row + 1] = g.n
+    row[#row + 1] = string.format('%.17g', g.revenue)
+    row[#row + 1] = g.quantity
+    rows[#rows + 1] = row
+end
+return cjson.encode(rows)
 """
 
 
@@ -71,9 +145,25 @@ def read_fields(r, ids, fields):
             yield dict(zip(fields, values))
 
 
-def scan(r, pages, fields):
+def aggregate(r, mode, pages):
+    """Run the AGGREGATE script on every page of ids; yields (key parts, n, revenue, quantity) of each page's groups."""
+    script = r.register_script(AGGREGATE)
     for ids in pages:
-        yield from read_fields(r, ids, fields)
+        if not ids:
+            continue
+        for *key, n, revenue, quantity in json.loads(script(keys=[], args=[mode, *ids])) or []:
+            yield tuple(key), int(n), float(revenue), int(quantity)
+
+
+def merge(groups):
+    """Add up the partial groups of all pages: key -> [n, revenue, quantity]."""
+    totals = {}
+    for key, n, revenue, quantity in groups:
+        t = totals.setdefault(key, [0, 0.0, 0])
+        t[0] += n
+        t[1] += revenue
+        t[2] += quantity
+    return totals
 
 
 def product_field(r, field):
@@ -83,25 +173,6 @@ def product_field(r, field):
     for pid in ids:
         pipe.hget(f"product:{pid}", field)
     return dict(zip(ids, pipe.execute()))
-
-
-class CustomerField:
-    """customer_id -> field, filled lazily (customers are many, only the referenced ones are read)."""
-
-    def __init__(self, r, field):
-        self.r, self.field, self.cache = r, field, {}
-
-    def load(self, ids):
-        missing = list(set(ids) - self.cache.keys())
-        for i in range(0, len(missing), CHUNK):
-            part = missing[i:i + CHUNK]
-            pipe = self.r.pipeline(transaction=False)
-            for cid in part:
-                pipe.hget(f"customer:{cid}", self.field)
-            self.cache.update(zip(part, pipe.execute()))
-
-    def __getitem__(self, cid):
-        return self.cache[cid]
 
 
 def read_by_key(r, ids):
@@ -120,39 +191,16 @@ def batches(items, size):
         yield items[i:i + size]
 
 
-def by_page(r, pages, fields):
-    """Like scan, but yields one list of dicts per page (for aggregations that look up customers per page)."""
-    for ids in pages:
-        yield list(read_fields(r, ids, fields))
-
-
-# aggregations (done in the client)
+# aggregations (done in the server by the AGGREGATE script, merged here)
 
 def group_medium(r):
-    category_of = product_field(r, "category")
-    totals = {}  # category -> [n, revenue, quantity]
-    for tx in scan(r, date_pages(r), ["product_id", "sales_amount", "quantity"]):
-        t = totals.setdefault(category_of[tx["product_id"]], [0, 0.0, 0])
-        t[0] += 1
-        t[1] += float(tx["sales_amount"])
-        t[2] += int(tx["quantity"])
-    rows = [(category, *t) for category, t in totals.items()]
+    totals = merge(aggregate(r, "medium", date_pages(r)))  # category -> [n, revenue, quantity]
+    rows = [(category, *t) for (category,), t in totals.items()]
     return sorted(rows, key=lambda row: (-row[2], row[0]))  # category, n, revenue, quantity
 
 
 def group_heavy(r, since):
-    category_of = product_field(r, "category")
-    segment_of = CustomerField(r, "customer_segment")
-    totals = {}  # (segment, category, region) -> [n, revenue, quantity]
-    fields = ["customer_id", "product_id", "region", "sales_amount", "quantity"]
-    for batch in by_page(r, date_pages(r, lo=ordinal(since)), fields):
-        segment_of.load(tx["customer_id"] for tx in batch)
-        for tx in batch:
-            key = (segment_of[tx["customer_id"]], category_of[tx["product_id"]], tx["region"])
-            t = totals.setdefault(key, [0, 0.0, 0])
-            t[0] += 1
-            t[1] += float(tx["sales_amount"])
-            t[2] += int(tx["quantity"])
+    totals = merge(aggregate(r, "heavy", date_pages(r, lo=ordinal(since))))  # (segment, category, region) -> [...]
     rows = [(*key, *t) for key, t in totals.items() if t[1] > 1000]  # segment, category, region, n, revenue, quantity
     return sorted(rows, key=lambda row: (-row[4], row[0], row[1], row[2]))[:20]
 
@@ -164,12 +212,8 @@ def s02(r, p):
 
 
 def s03(r, p):
-    totals = {}
-    for tx in scan(r, set_pages(r, "idx:tx:channel:Online"), ["region", "sales_amount"]):
-        t = totals.setdefault(tx["region"], [0, 0.0])
-        t[0] += 1
-        t[1] += float(tx["sales_amount"])
-    return [(region, n, revenue) for region, (n, revenue) in sorted(totals.items())]
+    totals = merge(aggregate(r, "region", set_pages(r, "idx:tx:channel:Online")))  # region -> [n, revenue, _]
+    return [(region, n, revenue) for (region,), (n, revenue, _) in sorted(totals.items())]
 
 
 def s04(r, p):
@@ -182,10 +226,8 @@ def s05(r, p):
 
 def s06(r, p):
     name_of = product_field(r, "product_name")
-    revenue_of = {}
-    for tx in scan(r, date_pages(r), ["product_id", "sales_amount"]):
-        revenue_of[tx["product_id"]] = revenue_of.get(tx["product_id"], 0.0) + float(tx["sales_amount"])
-    top = sorted(revenue_of.items(), key=lambda item: (-item[1], item[0]))[:10]
+    totals = merge(aggregate(r, "product", date_pages(r)))  # product_id -> [n, revenue, _]
+    top = sorted(((pid, t[1]) for (pid,), t in totals.items()), key=lambda item: (-item[1], item[0]))[:10]
     return [(pid, name_of[pid], revenue) for pid, revenue in top]
 
 
@@ -205,17 +247,8 @@ def s08(r, p):
 
 
 def s09(r, p):
-    category_of = product_field(r, "category")
-    age_of = CustomerField(r, "customer_age_group")
-    totals = {}  # (year, month, category, age group) -> revenue
-    fields = ["customer_id", "product_id", "transaction_date", "sales_amount"]
-    for batch in by_page(r, date_pages(r), fields):
-        age_of.load(tx["customer_id"] for tx in batch)
-        for tx in batch:
-            d = tx["transaction_date"]  # YYYY-MM-DD
-            key = (int(d[:4]), int(d[5:7]), category_of[tx["product_id"]], age_of[tx["customer_id"]])
-            totals[key] = totals.get(key, 0.0) + float(tx["sales_amount"])
-    rows = [(*key, revenue) for key, revenue in totals.items()]
+    totals = merge(aggregate(r, "age", date_pages(r)))  # (year, month, category, age group) -> [n, revenue, _]
+    rows = [(int(y), int(m), category, age, t[1]) for (y, m, category, age), t in totals.items()]
     return sorted(rows, key=lambda row: (-row[4], row[0], row[1], row[2], row[3]))[:20]
 
 

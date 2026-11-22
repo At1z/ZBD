@@ -93,7 +93,7 @@ ORDER BY region;
 ```
 
 - **MongoDB:** `$match` + `$group` + `$sort`.
-- **Redis:** `SMEMBERS idx:tx:channel:Online` → `HMGET region, sales_amount`, agregacja w kliencie.
+- **Redis:** Identyfikatory z `idx:tx:channel:Online` (`SSCAN`, paczkami) → skrypt Lua w serwerze: `HMGET` + `GROUP BY region`; klient scala paczki.
 
 ## 4. Liczba transakcji z jednego miesiąca
 
@@ -128,7 +128,7 @@ ORDER BY revenue DESC, p.category;
 ```
 
 - **MongoDB:** `$group` po wbudowanej kategorii produktu (bez `$lookup`).
-- **Redis:** Wszystkie transakcje (`ZRANGE idx:tx:date`) → `HMGET`; kategoria ze słownika produktów, agregacja w kliencie.
+- **Redis:** Identyfikatory wszystkich transakcji (`ZRANGE idx:tx:date`, paczkami) → skrypt Lua w serwerze: `HMGET`, kategoria z `HGET product:{id}`, `GROUP BY`; klient scala paczki.
 
 ## 6. Top 10 produktów wg przychodu
 
@@ -148,7 +148,7 @@ LIMIT 10;
 ```
 
 - **MongoDB:** `$group` po `product_id` (nazwa produktu wbudowana, `$first`) → `$sort` → `$limit`.
-- **Redis:** Jak S05, ale grupowanie po `product_id` w kliencie.
+- **Redis:** Jak S05, ale skrypt grupuje po `product_id`; nazwy 10 najlepszych klient bierze ze słownika produktów.
 
 ## 7. Zakupy 200 klientów z nazwami produktów
 
@@ -189,7 +189,7 @@ LIMIT 20;
 ```
 
 - **MongoDB:** `$match` po dacie + `$group` po wbudowanych polach (segment, kategoria) + `$match` + `$sort` + `$limit`, bez `$lookup`.
-- **Redis:** `ZRANGEBYSCORE idx:tx:date` → `HMGET`; segment klienta dociągany `HGET`, agregacja w kliencie.
+- **Redis:** Identyfikatory od `heavy_since` (`idx:tx:date`, paczkami) → skrypt Lua: `HMGET`, segment klienta (`HGET customer:{id}`) i kategoria (`HGET product:{id}`), `GROUP BY`; klient scala paczki i filtruje `HAVING`.
 
 ## 9. Miesięczny przychód per kategoria i grupa wiekowa
 
@@ -211,7 +211,7 @@ LIMIT 20;
 ```
 
 - **MongoDB:** `$group` po `$year` / `$month` i wbudowanych polach (kategoria, grupa wiekowa) + `$sort` + `$limit`, bez `$lookup`.
-- **Redis:** Pełny skan transakcji; rok i miesiąc z daty, kategoria i grupa wiekowa ze słowników; agregacja w kliencie.
+- **Redis:** Identyfikatory wszystkich transakcji (paczkami) → skrypt Lua: rok i miesiąc z daty, kategoria i grupa wiekowa przez `HGET`, `GROUP BY`; klient scala paczki.
 
 ## 10. Pojedyncze INSERT-y (×1000)
 

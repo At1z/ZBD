@@ -94,7 +94,7 @@ SCENARIOS = [
         ORDER BY region;
         """,
         "`$match` + `$group` + `$sort`.",
-        "`SMEMBERS idx:tx:channel:Online` → `HMGET region, sales_amount`, agregacja w kliencie.",
+        "Identyfikatory z `idx:tx:channel:Online` (`SSCAN`, paczkami) → skrypt Lua w serwerze: `HMGET` + `GROUP BY region`; klient scala paczki.",
     ),
     Scenario(
         "S04", "READ", "easy", "Liczba transakcji z jednego miesiąca",
@@ -117,7 +117,7 @@ SCENARIOS = [
         ORDER BY revenue DESC, p.category;
         """,
         "`$group` po wbudowanej kategorii produktu (bez `$lookup`).",
-        "Wszystkie transakcje (`ZRANGE idx:tx:date`) → `HMGET`; kategoria ze słownika produktów, agregacja w kliencie.",
+        "Identyfikatory wszystkich transakcji (`ZRANGE idx:tx:date`, paczkami) → skrypt Lua w serwerze: `HMGET`, kategoria z `HGET product:{id}`, `GROUP BY`; klient scala paczki.",
     ),
     Scenario(
         "S06", "READ", "medium", "Top 10 produktów wg przychodu",
@@ -131,7 +131,7 @@ SCENARIOS = [
         LIMIT 10;
         """,
         "`$group` po `product_id` (nazwa produktu wbudowana, `$first`) → `$sort` → `$limit`.",
-        "Jak S05, ale grupowanie po `product_id` w kliencie.",
+        "Jak S05, ale skrypt grupuje po `product_id`; nazwy 10 najlepszych klient bierze ze słownika produktów.",
     ),
     Scenario(
         "S07", "READ", "medium", "Zakupy 200 klientów z nazwami produktów",
@@ -162,7 +162,7 @@ SCENARIOS = [
         LIMIT 20;
         """,
         "`$match` po dacie + `$group` po wbudowanych polach (segment, kategoria) + `$match` + `$sort` + `$limit`, bez `$lookup`.",
-        "`ZRANGEBYSCORE idx:tx:date` → `HMGET`; segment klienta dociągany `HGET`, agregacja w kliencie.",
+        "Identyfikatory od `heavy_since` (`idx:tx:date`, paczkami) → skrypt Lua: `HMGET`, segment klienta (`HGET customer:{id}`) i kategoria (`HGET product:{id}`), `GROUP BY`; klient scala paczki i filtruje `HAVING`.",
     ),
     Scenario(
         "S09", "READ", "heavy", "Miesięczny przychód per kategoria i grupa wiekowa",
@@ -178,7 +178,7 @@ SCENARIOS = [
         LIMIT 20;
         """,
         "`$group` po `$year` / `$month` i wbudowanych polach (kategoria, grupa wiekowa) + `$sort` + `$limit`, bez `$lookup`.",
-        "Pełny skan transakcji; rok i miesiąc z daty, kategoria i grupa wiekowa ze słowników; agregacja w kliencie.",
+        "Identyfikatory wszystkich transakcji (paczkami) → skrypt Lua: rok i miesiąc z daty, kategoria i grupa wiekowa przez `HGET`, `GROUP BY`; klient scala paczki.",
     ),
     Scenario(
         "S10", "CREATE", "easy", "Pojedyncze INSERT-y (×1000)",
