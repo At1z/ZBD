@@ -10,6 +10,7 @@ own child process, so a scenario can be stopped after --timeout seconds ("timeou
 ("oom") without stopping the benchmark. If a scenario that changes data fails, the rest of the run is
 "skipped" (later results would not be comparable); a failed READ does not stop the run.
 
+Between two runs on different databases the benchmark rests for --pause seconds (default 15).
 Only the container of the measured database runs (the others are stopped, and all are started again at the
 end); --no-isolate keeps all of them running.
 
@@ -217,6 +218,9 @@ def main():
     parser.add_argument("--dbs", nargs="+", default=DATABASES, choices=DATABASES)
     parser.add_argument("--timeout", type=int, default=1800, help="seconds per scenario (default: 1800)")
     parser.add_argument("--load-timeout", type=int, default=7200, help="seconds for S01, the bulk load (default: 7200)")
+    parser.add_argument("--pause", type=int, default=15,
+                        help="seconds of rest before each run on a database that follows another one "
+                             "(default: 15, 0 = none)")
     parser.add_argument("--client-memory-gb", type=float, default=3.0,
                         help="kill a scenario whose Python process uses more memory than this (default: 3, 0 = off)")
     parser.add_argument("--isolate", action=argparse.BooleanOptionalAction, default=True,
@@ -246,6 +250,7 @@ def run(args):
         if new_file:
             writer.writeheader()
 
+        measured_before = False
         for size in args.sizes:
             dataset = RetailDataset(size=size).load()
             expected = dataset.expected_counts()
@@ -259,6 +264,10 @@ def run(args):
                     print(f"\n[{db}] {size:,} transactions, run {run}", flush=True)
                     if args.isolate:
                         switch_to(db)
+                    if measured_before and args.pause:  # let the machine settle between two databases
+                        print(f"  pause {args.pause}s", flush=True)
+                        time.sleep(args.pause)
+                    measured_before = True
                     records, answers[db] = run_database(db, dataset, expected, params, args.timeout, args.load_timeout,
                                                        args.client_memory_gb)
                     results[db] = records

@@ -3,8 +3,8 @@ import time
 
 # Every database gets the same hard limit, so the comparison is fair and a runaway database
 # (e.g. Redis with 10M transactions) is killed by Docker instead of freezing the whole machine.
-MEMORY_LIMIT = "5g"
-MEMORY_LIMIT_BYTES = 5 * 1024**3
+MEMORY_LIMIT = "6g"
+MEMORY_LIMIT_BYTES = 6 * 1024**3
 
 
 def docker(*args):
