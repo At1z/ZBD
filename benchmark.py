@@ -1,11 +1,11 @@
-"""Benchmark: the 24 scenarios of SCENARIOS.md on every database, for several sizes, several runs each.
+"""Benchmark: the 32 scenarios of SCENARIOS.md on every database, for several sizes, several runs each.
 
     uv run benchmark.py                                   # sizes 100000 1000000 10000000, 3 runs each
     uv run benchmark.py --sizes 100000 --runs 1           # quick check
     uv run benchmark.py --sizes 100000 --dbs postgres     # only some databases
     uv run benchmark.py --no-isolate                      # keep all containers running (default: only the measured one)
 
-One run = S01..S24 in order on one database (S01 loads the data, S24 deletes it). Every scenario runs in its
+One run = S01..S32 in order on one database (S01 loads the data, S32 deletes it). Every scenario runs in its
 own child process, so a scenario can be stopped after --timeout seconds ("timeout") or killed by the system
 ("oom") without stopping the benchmark. If a scenario that changes data fails, the rest of the run is
 "skipped" (later results would not be comparable); a failed READ does not stop the run.
@@ -168,7 +168,11 @@ def completed_runs(path):
         reader = csv.DictReader(f)
         if reader.fieldnames != COLUMNS:
             raise SystemExit(f"{path} has a different format (old benchmark?). Move or delete it first.")
+        layout = {s.id: (s.operation, s.difficulty) for s in SCENARIOS}
         for row in reader:
+            if layout.get(row["scenario"]) != (row["operation"], row["difficulty"]):
+                raise SystemExit(f"{path} was measured with other scenarios ({row['scenario']} is "
+                                 f"{row['operation']} / {row['difficulty']} there). Move or delete it first.")
             counts[(int(row["size"]), int(row["run"]), row["database"])] += 1
     return {key for key, n in counts.items() if n >= len(SCENARIOS)}
 

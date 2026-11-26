@@ -7,7 +7,7 @@ BATCH_SIZE = 10_000
 
 SCHEMA = [
     "SET FOREIGN_KEY_CHECKS = 0",
-    "DROP TABLE IF EXISTS transactions, products, customers",
+    "DROP TABLE IF EXISTS transactions, products, customers, monthly_sales",
     "SET FOREIGN_KEY_CHECKS = 1",
     """
     CREATE TABLE customers (

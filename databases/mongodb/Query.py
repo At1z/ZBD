@@ -1,4 +1,4 @@
-"""MongoDB implementation of scenarios S02..S24 (see SCENARIOS.md; S01 is DataInjection.inject).
+"""MongoDB implementation of scenarios S02..S32 (see SCENARIOS.md; S01 is DataInjection.inject).
 
 Contract used by benchmark.py: connect() -> ctx (the database), disconnect(ctx), SCENARIOS = {id: fn(ctx, params)}.
 A scenario returns a list of tuples (READ) or the number of affected documents (CREATE / UPDATE / DELETE).
@@ -13,8 +13,9 @@ from pymongo.errors import OperationFailure
 
 from zbd import connections
 
-BATCH = 1000          # ids per update_many in S15
+BATCH = 1000          # ids per update_many in S18 / S21 (and per delete_many in S28)
 INSERT_BATCH = 5000   # documents per insert_many
+SUMMARY = "monthly_sales"  # collection created by S15
 
 
 def connect():
@@ -151,20 +152,8 @@ def s09(db, p):
     return [(d["_id"]["y"], d["_id"]["m"], d["_id"]["category"], d["_id"]["age"], d["revenue"]) for d in rows]
 
 
-def s12(db, p):
+def s14(db, p):
     return read_by_key(db, p.new_single_ids)
-
-
-def s16(db, p):
-    return medium(db)
-
-
-def s17(db, p):
-    return heavy(db, p.heavy_since, with_quantity=True)
-
-
-def s21(db, p):
-    return [(db.transactions.count_documents({}),)]
 
 
 def s22(db, p):
@@ -172,6 +161,18 @@ def s22(db, p):
 
 
 def s23(db, p):
+    return heavy(db, p.heavy_since, with_quantity=True)
+
+
+def s29(db, p):
+    return [(db.transactions.count_documents({}),)]
+
+
+def s30(db, p):
+    return medium(db)
+
+
+def s31(db, p):
     return heavy(db, p.heavy_since, with_quantity=True)
 
 
@@ -185,31 +186,64 @@ def s10(db, p):
     return inserted
 
 
-def s11(db, p):
-    docs = embedded_docs(db, p.new_batch)
+def insert_in_batches(db, rows):
+    """insert_many in batches of INSERT_BATCH; the fields to embed are read per batch. Returns how many were inserted."""
     inserted = 0
-    for i in range(0, len(docs), INSERT_BATCH):
-        inserted += len(db.transactions.insert_many(docs[i:i + INSERT_BATCH], ordered=False).inserted_ids)
+    for i in range(0, len(rows), INSERT_BATCH):
+        docs = embedded_docs(db, rows[i:i + INSERT_BATCH])
+        inserted += len(db.transactions.insert_many(docs, ordered=False).inserted_ids)
     return inserted
+
+
+def s11(db, p):
+    return insert_in_batches(db, p.new_batch)
+
+
+def s12(db, p):
+    return insert_in_batches(db, p.new_bulk)
+
+
+def s13(db, p):
+    """New customers first, then their transactions (a standalone server has no multi-document transaction)."""
+    from main import load_module
+    injection = load_module("mongodb", "DataInjection")
+    customers = [injection.customer_doc(c) for c in p.new_customers]
+    inserted = len(db.customers.insert_many(customers, ordered=False).inserted_ids)
+    return inserted + insert_in_batches(db, p.new_customer_transactions)
+
+
+def s15(db, p):
+    """The S09 aggregation without $limit, written to a new collection with $out. Returns its number of documents."""
+    db[SUMMARY].drop()
+    aggregate(db, [
+        {"$group": {
+            "_id": {"y": {"$year": "$transaction_date"}, "m": {"$month": "$transaction_date"},
+                    "category": "$product.category", "age": "$customer.age_group"},
+            "n": {"$sum": 1},
+            "revenue": {"$sum": "$sales_amount"},
+        }},
+        {"$out": SUMMARY},
+    ])
+    return db[SUMMARY].count_documents({})
 
 
 # UPDATE
 
-def s13(db, p):
+def s16(db, p):
     modified = 0
     for tid in p.pk_ids:
         modified += db.transactions.update_one({"_id": tid}, {"$inc": {"quantity": 1}}).modified_count
     return modified
 
 
-def s14(db, p):
+def s17(db, p):
     return db.transactions.update_many(
         {"region": p.region, "transaction_date": date_range(p.update_start, p.update_end)},
         {"$inc": {"discount_pct": 1}},
     ).modified_count
 
 
-def s15(db, p):
+def s18(db, p):
     modified = 0
     for i in range(0, len(p.update_ids), BATCH):
         modified += db.transactions.update_many(
@@ -217,21 +251,48 @@ def s15(db, p):
     return modified
 
 
+def s19(db, p):
+    return db.transactions.update_many(
+        {"discount_pct": {"$gte": p.discount_min}}, {"$inc": {"quantity": 1, "discount_pct": 1}}).modified_count
+
+
+def s20(db, p):
+    """The category is embedded in every transaction, so no join is needed."""
+    return db.transactions.update_many(
+        {"product.category": p.update_category}, {"$inc": {"discount_pct": 2}}).modified_count
+
+
+def s21(db, p):
+    """Customers above the spending threshold become VIP: the new segment goes to the customer and to the copy
+    embedded in each of the customer's transactions (found through the customer_id index)."""
+    ids = [d["_id"] for d in aggregate(db, [
+        {"$group": {"_id": "$customer_id", "total": {"$sum": "$sales_amount"}}},
+        {"$match": {"total": {"$gt": float(p.vip_threshold)}}},
+    ])]
+    modified = 0
+    for i in range(0, len(ids), BATCH):
+        batch = ids[i:i + BATCH]
+        modified += db.customers.update_many(
+            {"_id": {"$in": batch}}, {"$set": {"customer_segment": p.vip_segment}}).modified_count
+        db.transactions.update_many({"customer_id": {"$in": batch}}, {"$set": {"customer.segment": p.vip_segment}})
+    return modified
+
+
 # DELETE
 
-def s18(db, p):
+def s24(db, p):
     deleted = 0
     for tid in p.new_single_ids:
         deleted += db.transactions.delete_one({"_id": tid}).deleted_count
     return deleted
 
 
-def s19(db, p):
+def s25(db, p):
     return db.transactions.delete_many(
         {"region": p.region, "transaction_date": date_range(p.delete_start, p.delete_end)}).deleted_count
 
 
-def s20(db, p):
+def s26(db, p):
     """Delete everything older than the cutoff (about half of the documents). Like in S08 the date index would read
     the documents at random positions of the collection, so a scan of the collection is tried first; if the server
     rejects the hint for a delete, the plain delete runs (the rejection happens before anything is deleted)."""
@@ -239,22 +300,43 @@ def s20(db, p):
     try:
         return db.transactions.delete_many(older, hint=[("$natural", 1)]).deleted_count
     except OperationFailure as error:
-        print(f"  [mongodb] S20: hint not accepted ({error}), deleting without it", flush=True)
+        print(f"  [mongodb] S26: hint not accepted ({error}), deleting without it", flush=True)
         return db.transactions.delete_many(older).deleted_count
+
+
+def s27(db, p):
+    """Every transaction of a VIP customer. The segment is embedded, so this is a scan of the collection."""
+    return db.transactions.delete_many({"customer.segment": p.vip_segment}).deleted_count
+
+
+def s28(db, p):
+    """Customers without transactions: $lookup finds at most one transaction per customer (customer_id index)."""
+    orphans = [d["_id"] for d in db.customers.aggregate([
+        {"$lookup": {"from": "transactions", "localField": "_id", "foreignField": "customer_id",
+                     "pipeline": [{"$limit": 1}, {"$project": {"_id": 1}}], "as": "any"}},
+        {"$match": {"any": {"$size": 0}}},
+        {"$project": {"_id": 1}},
+    ], allowDiskUse=True)]
+    deleted = 0
+    for i in range(0, len(orphans), BATCH):
+        deleted += db.customers.delete_many({"_id": {"$in": orphans[i:i + BATCH]}}).deleted_count
+    return deleted
 
 
 COLLECTIONS = ["transactions", "products", "customers"]
 
 
-def s24(db, p):
-    """Delete every document from all 3 collections. Returns the number left (must be 0)."""
+def s32(db, p):
+    """Delete every document from all 3 collections and drop the S15 one. Returns the number left (must be 0)."""
     for name in COLLECTIONS:
         db[name].delete_many({})
+    db[SUMMARY].drop()
     return sum(db[name].count_documents({}) for name in COLLECTIONS)
 
 
 SCENARIOS = {
     "S02": s02, "S03": s03, "S04": s04, "S05": s05, "S06": s06, "S07": s07, "S08": s08, "S09": s09,
     "S10": s10, "S11": s11, "S12": s12, "S13": s13, "S14": s14, "S15": s15, "S16": s16, "S17": s17,
-    "S18": s18, "S19": s19, "S20": s20, "S21": s21, "S22": s22, "S23": s23, "S24": s24,
+    "S18": s18, "S19": s19, "S20": s20, "S21": s21, "S22": s22, "S23": s23, "S24": s24, "S25": s25,
+    "S26": s26, "S27": s27, "S28": s28, "S29": s29, "S30": s30, "S31": s31, "S32": s32,
 }

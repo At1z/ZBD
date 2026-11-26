@@ -5,14 +5,14 @@
 
 Tables
     per database  - rows: CREATE / READ / UPDATE / DELETE / SUM, columns: every size x runs 1..3 + best run
-    per size      - rows: CREATE / READ / UPDATE / DELETE / SUM, columns: databases (best run), then all 24 scenarios
+    per size      - rows: CREATE / READ / UPDATE / DELETE / SUM, columns: databases (best run), then all 32 scenarios
     repeatability - per size: total of every run and the spread between runs (table + chart)
-    appendix      - per database, all 24 scenarios in every run
+    appendix      - per database, all 32 scenarios in every run
 Charts
     per database  - best runs of every size compared (log scale)
-    per size      - best runs of every database compared (log scale), plus one chart with all 24 scenarios
+    per size      - best runs of every database compared (log scale), plus one chart with all 32 scenarios
 
-"Best run" = the complete run (all 24 scenarios ok) with the smallest total. If no run of a database and size
+"Best run" = the complete run (all 32 scenarios ok) with the smallest total. If no run of a database and size
 is complete, the run with the most successful scenarios is used and marked as incomplete.
 """
 import argparse
@@ -107,7 +107,7 @@ def fmt(value):
 
 
 def group_label(group):
-    return "SUMA (24)" if group == "SUM" else f"{group} ({OPS_COUNT[group]})"
+    return f"SUMA ({len(SCENARIOS)})" if group == "SUM" else f"{group} ({OPS_COUNT[group]})"
 
 
 def md_table(headers, rows):
@@ -178,7 +178,7 @@ def table_scenarios(runs, size, dbs):
 
 
 def table_repeatability(runs, size, dbs):
-    """Total of all 24 scenarios in every run and the spread between the complete runs: (max - min) / min."""
+    """Total of all 32 scenarios in every run and the spread between the complete runs: (max - min) / min."""
     run_numbers = sorted({run for (_, sz, run) in runs if sz == size})
     headers = ["Baza"] + [f"run {run}" for run in run_numbers] + ["rozrzut"]
     rows = []
@@ -354,7 +354,7 @@ def chart_repeatability(runs, size, dbs, out):
         ax.set_xticks(range(len(dbs)))
         ax.set_xticklabels([NAMES[db] for db in dbs], fontsize=9, color=INK2)
     ax1.set_ylim(0, top * 1.1)
-    ax1.set_ylabel("sekundy (suma 24 scenariuszy)", color=INK2, fontsize=9)
+    ax1.set_ylabel("sekundy (suma 32 scenariuszy)", color=INK2, fontsize=9)
     ax1.set_title("Suma czasów w każdym runie", color=INK, fontsize=11, loc="left", pad=10)
     ax2.set_ylim(0, max([s for _, s in data.values() if s is not None] + [5]) * 1.25)
     ax2.set_ylabel("%", color=INK2, fontsize=9)
@@ -382,7 +382,7 @@ def build(csv_path, out):
 
     md = ["# Wyniki benchmarku", "",
           f"Źródło: `{csv_path.name}`. Czasy w sekundach. R1–R3 to kolejne runy, `best*` to najlepszy run "
-          "(kompletny run z najmniejszą sumą czasów wszystkich 24 scenariuszy; jeśli żaden run nie był kompletny, "
+          "(kompletny run z najmniejszą sumą czasów wszystkich 32 scenariuszy; jeśli żaden run nie był kompletny, "
           "run z największą liczbą udanych scenariuszy). Tekst zamiast liczby oznacza, że scenariusz się nie udał: "
           "`timeout`, `oom`, `error` albo `skipped` (pominięty, bo wcześniejsza modyfikacja danych się nie udała); "
           "`DNF` w wierszu SUMA oznacza, że run nie został ukończony. Na wykresach krzyżyk (×) przy osi oznacza scenariusz, który się nie udał, z jego statusem. Skala wykresów jest logarytmiczna. Opis scenariuszy: [SCENARIOS.md](../../SCENARIOS.md).", ""]
@@ -397,12 +397,12 @@ def build(csv_path, out):
         label = f"{size:,}".replace(",", " ")
         md += [f"### {label} transakcji", "", table_per_size(runs, size, dbs), "",
                f"![{label}]({chart_per_size(runs, size, dbs, out)})", "",
-               "<details><summary>Wszystkie 24 scenariusze</summary>", "",
+               "<details><summary>Wszystkie 32 scenariusze</summary>", "",
                table_scenarios(runs, size, dbs), "",
                f"![scenariusze {label}]({chart_scenarios(runs, size, dbs, out)})", "", "</details>", ""]
 
     md += ["## Powtarzalność runów", "",
-           "Suma czasów wszystkich 24 scenariuszy w każdym runie (sekundy) i rozrzut między kompletnymi runami: "
+           "Suma czasów wszystkich 32 scenariuszy w każdym runie (sekundy) i rozrzut między kompletnymi runami: "
            "(największy − najmniejszy) / najmniejszy. Mały rozrzut znaczy, że różnice między bazami są większe niż "
            "szum pomiaru.", ""]
     for size in sizes:
