@@ -7,7 +7,7 @@ A project for working with four databases, each running in its own Docker contai
 ```
 ZBD/
 ├── main.py            # starts every container and loads the full dataset
-├── benchmark.py       # runs the 24 scenarios on every database (runs, timeouts, CSV)
+├── benchmark.py       # runs the 32 scenarios on every database (runs, timeouts, CSV)
 ├── report.py          # tables and charts from results/runs.csv
 ├── pyproject.toml     # dependencies (uv)
 ├── uv.lock            # pinned dependency versions (commit it)
@@ -16,12 +16,12 @@ ZBD/
 │   ├── connections.py     # connection factories shared by all databases
 │   ├── docker.py          # starts / stops containers (limits, engine settings, health checks)
 │   ├── dataset.py         # RetailDataset: downloads, splits into 3 tables, replicates
-│   └── scenarios.py       # the 24 scenarios and their shared parameters
+│   └── scenarios.py       # the 32 scenarios and their shared parameters
 ├── databases/
 │   ├── postgres/
 │   │   ├── initDB.py          # starts the container
 │   │   ├── DataInjection.py   # CREATE (S01): schema + data insertion, check() health query
-│   │   └── Query.py           # scenarios S02..S24
+│   │   └── Query.py           # scenarios S02..S32
 │   ├── mysql/      (same files)
 │   ├── mongodb/    (same files)
 │   └── redis/      (same files)
@@ -106,9 +106,9 @@ uv run python -m zbd.dataset     # writes data/customers.csv, data/products.csv,
 
 ## Benchmark
 
-24 scenarios (8 easy, 8 medium, 8 heavy; 3 CREATE, 14 READ, 3 UPDATE, 4 DELETE), identical for every database. The full list with the query of each scenario is in [SCENARIOS.md](SCENARIOS.md) (generated from `zbd/scenarios.py`: `uv run python -m zbd.scenarios --markdown`).
+32 scenarios (8 easy, 8 medium, 16 heavy; 6 CREATE, 14 READ, 6 UPDATE, 6 DELETE), identical for every database. The full list with the query of each scenario is in [SCENARIOS.md](SCENARIOS.md) (generated from `zbd/scenarios.py`: `uv run python -m zbd.scenarios --markdown`).
 
-One **run** = S01..S24 in a fixed order on one database (S01 loads the data, S24 deletes it). Every size is repeated 3 times, so 3 sizes x 3 runs = 9 runs per database:
+One **run** = S01..S32 in a fixed order on one database (S01 loads the data, S32 deletes it). Every size is repeated 3 times, so 3 sizes x 3 runs = 9 runs per database:
 
 ```
 uv run benchmark.py                                      # sizes 100000 1000000 10000000, 3 runs each
@@ -125,7 +125,7 @@ uv run python -m zbd.scenarios --size 1000000           # show the parameters th
 - Every scenario runs in its own process: a scenario that takes longer than `--timeout` is recorded as `timeout`, one whose Python process exceeds `--client-memory-gb` or that is killed by the system as `oom`, an exception as `error`. A failed READ does not stop the run; a failed CREATE / UPDATE / DELETE makes the rest of the run `skipped`, because later results would not be comparable.
 - Results are appended to `results/runs.csv` (`size, run, database, scenario, operation, difficulty, seconds, rows, status, digest`). Finished (database, size, run) triples are skipped, so an interrupted benchmark can be started again with the same arguments.
 - Ids, filters and new rows are derived from the data (`Params` in `zbd/scenarios.py`), so every database gets exactly the same input. Results are compared between databases and a warning is printed if they differ.
-- Each `Query.py` has to provide `connect()`, `disconnect(ctx)` and `SCENARIOS = {"S02": fn, ..., "S24": fn}` (S01 is `DataInjection.inject`). Note: the benchmark wipes the data in the databases, run `uv run main.py` afterwards to load the full dataset again.
+- Each `Query.py` has to provide `connect()`, `disconnect(ctx)` and `SCENARIOS = {"S02": fn, ..., "S32": fn}` (S01 is `DataInjection.inject`). Note: the benchmark wipes the data in the databases, run `uv run main.py` afterwards to load the full dataset again.
 
 ## Report
 
@@ -134,19 +134,19 @@ uv run report.py                          # results/runs.csv -> results/report/r
 uv run report.py --csv other.csv --out some/dir
 ```
 
-`results/report/report.md` contains: one table per database (rows CREATE / READ / UPDATE / DELETE / SUM, columns: every size x runs 1..3 + the best run), one comparison per size (best run of every database, then all 24 scenarios), an appendix with every scenario in every run, and the charts (per database: sizes compared; per size: databases compared; per size: all 24 scenarios; log scale). "Best run" is the complete run with the smallest total; a scenario that failed is shown as its status (`timeout`, `oom`, `error`, `skipped`) and as a cross on the charts, never as a zero. Colors follow the entity (one fixed color per database).
+`results/report/report.md` contains: one table per database (rows CREATE / READ / UPDATE / DELETE / SUM, columns: every size x runs 1..3 + the best run), one comparison per size (best run of every database, then all 32 scenarios), an appendix with every scenario in every run, and the charts (per database: sizes compared; per size: databases compared; per size: all 32 scenarios; log scale). "Best run" is the complete run with the smallest total; a scenario that failed is shown as its status (`timeout`, `oom`, `error`, `skipped`) and as a cross on the charts, never as a zero. Colors follow the entity (one fixed color per database).
 
 ## Files in each database folder
 
 - `initDB.py` – database initialization (starts the container)
 - `DataInjection.py` – CREATE (scenario S01): schema, bulk load of the 3 tables from `RetailDataset`, indexes, plus `check()` (health query)
-- `Query.py` – scenarios S02..S24 (`SCENARIOS`, `connect()`, `disconnect()`), see [SCENARIOS.md](SCENARIOS.md)
+- `Query.py` – scenarios S02..S32 (`SCENARIOS`, `connect()`, `disconnect()`), see [SCENARIOS.md](SCENARIOS.md)
 
 Indexes: only the ones some scenario uses (transaction date, customer; Redis also the `Online` channel set). There is no `product_id` or `region` index in any database; the only exception is MySQL, where InnoDB creates an index for the `product_id` foreign key automatically.
 
-MongoDB uses an embedded model: every transaction document carries the customer (segment, age group) and product (category, name) fields the scenarios need, so its queries need no `$lookup`; `customers` and `products` are still loaded as collections. The price shows in S01 (bigger documents) and in S10 / S11 (the fields to embed are read before inserting). The results are identical to the other databases (checked by the benchmark), only the data model differs. The three heavy scenarios (S08, S17, S23) force a scan of the whole collection (`hint {$natural: 1}`): with the date index, MongoDB read the matching documents in date order, i.e. at random positions in the collection, which at 10M documents no longer fits in the cache (78 s instead of a few seconds).
+MongoDB uses an embedded model: every transaction document carries the customer (segment, age group) and product (category, name) fields the scenarios need, so its queries need no `$lookup`; `customers` and `products` are still loaded as collections. The price shows in S01 (bigger documents) and in S10 / S11 (the fields to embed are read before inserting). The cost of embedding also shows in S21: a customer's new segment has to be written to the customer and to every embedded copy in `transactions`, while the SQL databases and Redis change one row / hash. The results are identical to the other databases (checked by the benchmark), only the data model differs. The three heavy scenarios (S08, S23, S31) force a scan of the whole collection (`hint {$natural: 1}`): with the date index, MongoDB read the matching documents in date order, i.e. at random positions in the collection, which at 10M documents no longer fits in the cache (78 s instead of a few seconds).
 
-Redis has no joins or aggregation commands, so scenarios with joins / grouping (S03, S05, S06, S08, S09, S16, S17, S22, S23) use a Lua script that runs inside the server (`AGGREGATE` in `databases/redis/Query.py`): the client reads the transaction ids page by page (by rank in the date index, or with SSCAN), the script reads the hashes of the page, looks up customers / products and returns the partial groups, and the client merges the pages. Only ids go to the server and a few group rows come back, so client memory stays flat whatever the size. Aggregating inside the server is Redis's own way of doing a `GROUP BY` (the other databases do it in their query engine); the time is not comparable to a client-side aggregation.
+Redis has no joins or aggregation commands, so scenarios with joins / grouping (S03, S05, S06, S08, S09, S15, S22, S23, S30, S31) use a Lua script that runs inside the server (`AGGREGATE` in `databases/redis/Query.py`): the client reads the transaction ids page by page (by rank in the date index, or with SSCAN), the script reads the hashes of the page, looks up customers / products and returns the partial groups, and the client merges the pages. Only ids go to the server and a few group rows come back, so client memory stays flat whatever the size. Aggregating inside the server is Redis's own way of doing a `GROUP BY` (the other databases do it in their query engine); the time is not comparable to a client-side aggregation. Conditional updates (S19, S20, S21) are scripts too: Redis has no `UPDATE ... WHERE`, so the script scans a page of ids and changes the hashes that match.
 
 ## Resources
 

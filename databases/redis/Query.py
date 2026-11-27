@@ -1,4 +1,4 @@
-"""Redis implementation of scenarios S02..S24 (see SCENARIOS.md; S01 is DataInjection.inject).
+"""Redis implementation of scenarios S02..S32 (see SCENARIOS.md; S01 is DataInjection.inject).
 
 Contract used by benchmark.py: connect() -> ctx (the client), disconnect(ctx), SCENARIOS = {id: fn(ctx, params)}.
 A scenario returns a list of tuples (READ) or the number of affected hashes (CREATE / UPDATE / DELETE).
@@ -17,6 +17,8 @@ from zbd import connections
 DATE_INDEX = "idx:tx:date"   # sorted set: member = transaction id, score = date ordinal
 PAGE = 50_000                # ids read from an index at once
 CHUNK = 10_000               # commands per pipeline
+CUSTOMER_PAGE = 5_000         # customers per PROMOTE_CUSTOMERS call (each customer costs a few commands)
+SUMMARY = "monthly_sales"    # key prefix of the hashes created by S15
 
 # HINCRBY would create a missing hash, so change the field only when the transaction exists
 INCREMENT_IF_EXISTS = """
@@ -25,6 +27,57 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
     return 1
 end
 return 0
+"""
+
+# Conditional updates inside the server for one page of transaction ids (ARGV[2..] = ids unless noted). Return the number
+# of changed hashes. Redis has no UPDATE ... WHERE, so a scan with a check on the hash is the only way.
+# S19: ARGV[1] = minimum discount_pct
+UPDATE_BY_DISCOUNT = """
+local minimum, updated = tonumber(ARGV[1]), 0
+for i = 2, #ARGV do
+    local key = 'transaction:' .. ARGV[i]
+    local discount = redis.call('HGET', key, 'discount_pct')
+    if discount and tonumber(discount) >= minimum then
+        redis.call('HINCRBY', key, 'quantity', 1)
+        redis.call('HINCRBY', key, 'discount_pct', 1)
+        updated = updated + 1
+    end
+end
+return updated
+"""
+
+# S20: ARGV[1] = increment of discount_pct, ARGV[2] = number of product ids, then those ids, then the transaction ids
+UPDATE_BY_PRODUCTS = """
+local wanted, n, updated = {}, tonumber(ARGV[2]), 0
+for i = 3, 2 + n do
+    wanted[ARGV[i]] = true
+end
+for i = 3 + n, #ARGV do
+    local key = 'transaction:' .. ARGV[i]
+    local product = redis.call('HGET', key, 'product_id')
+    if product and wanted[product] then
+        redis.call('HINCRBY', key, 'discount_pct', ARGV[1])
+        updated = updated + 1
+    end
+end
+return updated
+"""
+
+# S21: ARGV[1] = spending threshold, ARGV[2] = new segment, ARGV[3..] = customer ids. A customer whose transactions
+# (idx:tx:customer:{id}) add up to more than the threshold gets the new segment.
+PROMOTE_CUSTOMERS = """
+local threshold, promoted = tonumber(ARGV[1]), 0
+for i = 3, #ARGV do
+    local total = 0
+    for _, tid in ipairs(redis.call('SMEMBERS', 'idx:tx:customer:' .. ARGV[i])) do
+        total = total + tonumber(redis.call('HGET', 'transaction:' .. tid, 'sales_amount'))
+    end
+    if total > threshold then
+        redis.call('HSET', 'customer:' .. ARGV[i], 'customer_segment', ARGV[2])
+        promoted = promoted + 1
+    end
+end
+return promoted
 """
 
 # GROUP BY inside the server for one page of transaction ids.
@@ -252,20 +305,8 @@ def s09(r, p):
     return sorted(rows, key=lambda row: (-row[4], row[0], row[1], row[2], row[3]))[:20]
 
 
-def s12(r, p):
+def s14(r, p):
     return read_by_key(r, p.new_single_ids)
-
-
-def s16(r, p):
-    return group_medium(r)
-
-
-def s17(r, p):
-    return group_heavy(r, p.heavy_since)
-
-
-def s21(r, p):
-    return [(r.zcard(DATE_INDEX),)]
 
 
 def s22(r, p):
@@ -273,6 +314,18 @@ def s22(r, p):
 
 
 def s23(r, p):
+    return group_heavy(r, p.heavy_since)
+
+
+def s29(r, p):
+    return [(r.zcard(DATE_INDEX),)]
+
+
+def s30(r, p):
+    return group_medium(r)
+
+
+def s31(r, p):
     return group_heavy(r, p.heavy_since)
 
 
@@ -295,18 +348,49 @@ def s10(r, p):
     return len(p.new_single)
 
 
-def s11(r, p):
-    for rows in batches(p.new_batch, CHUNK):
+def insert_rows(r, rows):
+    for part in batches(rows, CHUNK):
         pipe = r.pipeline(transaction=False)
-        for row in rows:
+        for row in part:
             add_transaction(pipe, row)
         pipe.execute()
-    return len(p.new_batch)
+    return len(rows)
+
+
+def s11(r, p):
+    return insert_rows(r, p.new_batch)
+
+
+def s12(r, p):
+    return insert_rows(r, p.new_bulk)
+
+
+def s13(r, p):
+    """New customers (hash + id set) first, then their transactions (no cross-key transaction)."""
+    for part in batches(p.new_customers, CHUNK):
+        pipe = r.pipeline(transaction=False)
+        for customer in part:
+            pipe.hset(f"customer:{customer['customer_id']}", mapping=customer)
+            pipe.sadd("ids:customers", customer["customer_id"])
+        pipe.execute()
+    return len(p.new_customers) + insert_rows(r, p.new_customer_transactions)
+
+
+def s15(r, p):
+    """The S09 aggregation without a limit (script in the server, merged here), written as one hash per group."""
+    totals = merge(aggregate(r, "age", date_pages(r)))  # (year, month, category, age group) -> [n, revenue, _]
+    for part in batches(list(totals.items()), CHUNK):
+        pipe = r.pipeline(transaction=False)
+        for (y, m, category, age), (n, revenue, _) in part:
+            pipe.hset(f"{SUMMARY}:{int(y)}-{int(m)}-{category}-{age}", mapping={
+                "y": int(y), "m": int(m), "category": category, "customer_age_group": age, "n": n, "revenue": revenue})
+        pipe.execute()
+    return len(totals)
 
 
 # UPDATE
 
-def s13(r, p):
+def s16(r, p):
     increment = r.register_script(INCREMENT_IF_EXISTS)
     return sum(increment(keys=[f"transaction:{tid}"], args=["quantity", 1]) for tid in p.pk_ids)
 
@@ -334,13 +418,34 @@ def ids_in_region(r, lo, hi, region):
     return ids
 
 
-def s14(r, p):
+def s17(r, p):
     ids = ids_in_region(r, ordinal(p.update_start), ordinal(p.update_end) - 1, p.region)
     return increment_many(r, ids, "discount_pct")
 
 
-def s15(r, p):
+def s18(r, p):
     return increment_many(r, p.update_ids, "quantity")
+
+
+def update_on_pages(r, script, args, pages):
+    """Run an update script on every page of ids (ids go after `args`). Returns the number of changed hashes."""
+    script = r.register_script(script)
+    return sum(int(script(keys=[], args=[*args, *ids])) for ids in pages if ids)
+
+
+def s19(r, p):
+    return update_on_pages(r, UPDATE_BY_DISCOUNT, [p.discount_min], date_pages(r))
+
+
+def s20(r, p):
+    category = product_field(r, "category")
+    products = sorted(pid for pid, c in category.items() if c == p.update_category)
+    return update_on_pages(r, UPDATE_BY_PRODUCTS, [2, len(products), *products], date_pages(r))
+
+
+def s21(r, p):
+    pages = (part for page in set_pages(r, "ids:customers") for part in batches(page, CUSTOMER_PAGE))
+    return update_on_pages(r, PROMOTE_CUSTOMERS, [str(p.vip_threshold), p.vip_segment], pages)
 
 
 # DELETE
@@ -365,16 +470,51 @@ def delete_transactions(r, ids):
     return deleted
 
 
-def s18(r, p):
+def s27(r, p):
+    """Customers with the VIP segment are found by reading every customer; their transactions come from the
+    customer index."""
+    deleted = 0
+    for page in set_pages(r, "ids:customers"):
+        pipe = r.pipeline(transaction=False)
+        for customer_id in page:
+            pipe.hget(f"customer:{customer_id}", "customer_segment")
+        vip = [cid for cid, segment in zip(page, pipe.execute()) if segment == p.vip_segment]
+        for part in batches(vip, 1000):
+            pipe = r.pipeline(transaction=False)
+            for customer_id in part:
+                pipe.smembers(f"idx:tx:customer:{customer_id}")
+            deleted += delete_transactions(r, [tid for members in pipe.execute() for tid in members])
+    return deleted
+
+
+def s28(r, p):
+    """Customers whose transaction set is empty (Redis drops an empty set) are deleted from the hashes and the id set."""
+    orphans = []
+    for page in set_pages(r, "ids:customers"):
+        pipe = r.pipeline(transaction=False)
+        for customer_id in page:
+            pipe.scard(f"idx:tx:customer:{customer_id}")
+        orphans += [cid for cid, count in zip(page, pipe.execute()) if count == 0]
+    deleted = 0
+    for part in batches(orphans, CHUNK):
+        pipe = r.pipeline(transaction=False)
+        for customer_id in part:
+            pipe.delete(f"customer:{customer_id}")
+            pipe.srem("ids:customers", customer_id)
+        deleted += sum(pipe.execute()[0::2])  # every customer queued DEL, SREM
+    return deleted
+
+
+def s24(r, p):
     return sum(delete_transactions(r, [tid]) for tid in p.new_single_ids)
 
 
-def s19(r, p):
+def s25(r, p):
     ids = ids_in_region(r, ordinal(p.delete_start), ordinal(p.delete_end) - 1, p.region)
     return delete_transactions(r, ids)
 
 
-def s20(r, p):
+def s26(r, p):
     """Delete everything older than the cutoff. Always takes the oldest page, so there is no growing offset."""
     deleted = 0
     while True:
@@ -384,7 +524,7 @@ def s20(r, p):
         deleted += delete_transactions(r, ids)
 
 
-def s24(r, p):
+def s32(r, p):
     """FLUSHDB: Redis has no tables, everything lives in one keyspace. Returns the number of keys left."""
     r.flushdb()
     return r.dbsize()
@@ -393,5 +533,6 @@ def s24(r, p):
 SCENARIOS = {
     "S02": s02, "S03": s03, "S04": s04, "S05": s05, "S06": s06, "S07": s07, "S08": s08, "S09": s09,
     "S10": s10, "S11": s11, "S12": s12, "S13": s13, "S14": s14, "S15": s15, "S16": s16, "S17": s17,
-    "S18": s18, "S19": s19, "S20": s20, "S21": s21, "S22": s22, "S23": s23, "S24": s24,
+    "S18": s18, "S19": s19, "S20": s20, "S21": s21, "S22": s22, "S23": s23, "S24": s24, "S25": s25,
+    "S26": s26, "S27": s27, "S28": s28, "S29": s29, "S30": s30, "S31": s31, "S32": s32,
 }

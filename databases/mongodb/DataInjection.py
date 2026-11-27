@@ -90,6 +90,7 @@ def inject(dataset):
         db[name].drop()
         insert_docs(db[name], docs)
         print(f"[mongodb] {name} loaded")
+    db.monthly_sales.drop()  # the derived collection of S15 from an earlier run
     db.transactions.create_index("customer_id")
     db.transactions.create_index("transaction_date")
 

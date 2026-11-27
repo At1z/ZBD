@@ -4,7 +4,7 @@ from zbd import connections
 from zbd.dataset import CUSTOMER_COLUMNS, PRODUCT_COLUMNS, TRANSACTION_COLUMNS
 
 SCHEMA = """
-DROP TABLE IF EXISTS transactions, products, customers CASCADE;
+DROP TABLE IF EXISTS transactions, products, customers, monthly_sales CASCADE;
 
 CREATE TABLE customers (
     customer_id        TEXT PRIMARY KEY,
