@@ -12,12 +12,17 @@ Charts
     per database  - best runs of every size compared (log scale)
     per size      - best runs of every database compared (log scale), plus one chart with all 32 scenarios
 
+Prediction vs measurement (last section, only when the predicted CSV exists)
+    --predicted results/runs_calibrated.csv is compared with the measured CSV: deviation per scenario, per size,
+    per database and per operation, plus two charts. The smallest common size is the calibration set, the rest is the test.
+
 "Best run" = the complete run (all 32 scenarios ok) with the smallest total. If no run of a database and size
 is complete, the run with the most successful scenarios is used and marked as incomplete.
 """
 import argparse
 import csv
 import math
+import statistics
 from collections import defaultdict
 from pathlib import Path
 
@@ -33,6 +38,7 @@ from zbd.scenarios import SCENARIOS  # noqa: E402
 
 DEFAULT_CSV = ROOT / "results" / "runs.csv"
 DEFAULT_OUT = ROOT / "results" / "report"
+DEFAULT_PREDICTED = ROOT / "results" / "runs_calibrated.csv"
 OPS = ["CREATE", "READ", "UPDATE", "DELETE"]
 GROUPS = OPS + ["SUM"]
 OPS_COUNT = {op: sum(s.operation == op for s in SCENARIOS) for op in OPS}
@@ -370,9 +376,186 @@ def chart_repeatability(runs, size, dbs, out):
     return name
 
 
+# ---------- prediction vs measurement
+
+def load_medians(path):
+    """{(database, scenario, size): median seconds of the ok runs}"""
+    values = defaultdict(list)
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            if row["status"] == "ok":
+                values[(row["database"], row["scenario"], int(row["size"]))].append(float(row["seconds"]))
+    return {key: statistics.median(v) for key, v in values.items()}
+
+
+def comparison_pairs(real_path, predicted_path):
+    """One pair per (database, scenario, size) present in both files: measured vs predicted median."""
+    real, predicted = load_medians(real_path), load_medians(predicted_path)
+    operation = {s.id: s.operation for s in SCENARIOS}
+    return [{"db": db, "scenario": sc, "size": size, "op": operation[sc], "real": real[(db, sc, size)],
+             "pred": predicted[(db, sc, size)], "err": (predicted[(db, sc, size)] - real[(db, sc, size)]) / real[(db, sc, size)]}
+            for (db, sc, size) in sorted(real) if (db, sc, size) in predicted and real[(db, sc, size)] > 0]
+
+
+def deviation_stats(pairs):
+    """Row of the summary tables for a list of pairs (err = (predicted - measured) / measured)."""
+    if not pairs:
+        return None
+    ab = [abs(p["err"]) for p in pairs]
+    real, pred = sum(p["real"] for p in pairs), sum(p["pred"] for p in pairs)
+    share = lambda limit: sum(a <= limit for a in ab) / len(ab) * 100
+    factor2 = sum(0.5 <= p["pred"] / p["real"] <= 2 for p in pairs) / len(pairs) * 100
+    return {"n": len(pairs), "median": statistics.median(ab) * 100, "mean": statistics.fmean(ab) * 100,
+            "bias": statistics.median(p["err"] for p in pairs) * 100, "total": (pred - real) / real * 100,
+            "w10": share(0.10), "w25": share(0.25), "w50": share(0.50), "x2": factor2}
+
+
+def pct(value, signed=False):
+    rounded = round(value)
+    return "0%" if rounded == 0 else f"{rounded:+d}%" if signed else f"{rounded}%"
+
+
+def deviation_table(first_header, groups):
+    """groups: [(label, pairs)]"""
+    headers = [first_header, "Par", "Mediana odchylenia", "Średnie odchylenie", "Przesunięcie (mediana ze znakiem)",
+               "Odchylenie sumy czasów", "w ±10%", "w ±25%", "w ±50%", "w granicach ×2"]
+    rows = []
+    for label, pairs in groups:
+        st = deviation_stats(pairs)
+        if st:
+            rows.append([label, st["n"], pct(st["median"]), pct(st["mean"]), pct(st["bias"], True), pct(st["total"], True),
+                         pct(st["w10"]), pct(st["w25"]), pct(st["w50"]), pct(st["x2"])])
+    return md_table(headers, rows)
+
+
+def chart_prediction_scatter(pairs, out):
+    """Predicted vs measured seconds (log-log); on the diagonal = perfect prediction, band = within a factor of 2."""
+    fig, ax = plt.subplots(figsize=(6.4, 6.0), dpi=150)
+    style(fig, ax, "both")
+    values = [p[k] for p in pairs for k in ("real", "pred")]
+    low, high = min(values) / 2, max(values) * 2
+    ax.fill_between([low, high], [low / 2, high / 2], [low * 2, high * 2], color=GRID, alpha=0.55, linewidth=0)
+    ax.plot([low, high], [low, high], color=AXIS, linewidth=1)
+    for db in DB_COLORS:
+        mine = [p for p in pairs if p["db"] == db]
+        ax.scatter([p["real"] for p in mine], [p["pred"] for p in mine], s=14, color=DB_COLORS[db], alpha=0.75,
+                   edgecolors=SURFACE, linewidths=0.4)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(low, high)
+    ax.set_ylim(low, high)
+    ax.set_xlabel("pomiar (sekundy)", color=INK2, fontsize=9)
+    ax.set_ylabel("predykcja AI (sekundy)", color=INK2, fontsize=9)
+    ax.set_title("Predykcja vs pomiar (szare pasmo: do dwukrotnej różnicy)", color=INK, fontsize=11, loc="left", pad=10)
+    fig.legend(handles=[Patch(facecolor=c, label=NAMES[db]) for db, c in DB_COLORS.items() if any(p["db"] == db for p in pairs)],
+               frameon=False, fontsize=9, labelcolor=INK2, ncol=4, loc="lower center")
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    name = "prediction_scatter.png"
+    fig.savefig(out / name, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return name
+
+
+def chart_prediction_by_operation(pairs, sizes, out):
+    """Median absolute deviation per operation, one bar per size."""
+    fig, ax = plt.subplots(figsize=(8.5, 4.4), dpi=150)
+    style(fig, ax, "y")
+    n = len(sizes)
+    width = 0.8 / n
+    top = 1.0
+    for i, size in enumerate(sizes):
+        color = SIZE_COLORS[min(i, len(SIZE_COLORS) - 1)]
+        for j, op in enumerate(OPS):
+            mine = [abs(p["err"]) * 100 for p in pairs if p["size"] == size and p["op"] == op]
+            if not mine:
+                continue
+            value = statistics.median(mine)
+            top = max(top, value)
+            pos = j + (i - (n - 1) / 2) * width
+            ax.bar(pos, value, width=width * 0.86, color=color, edgecolor=SURFACE, linewidth=1)
+            ax.text(pos, value + top * 0.015, f"{value:.0f}%", ha="center", fontsize=8, color=INK2)
+    ax.set_xticks(range(len(OPS)))
+    ax.set_xticklabels(OPS, fontsize=10, color=INK2)
+    ax.set_ylim(0, top * 1.15)
+    ax.set_ylabel("mediana odchylenia (%)", color=INK2, fontsize=9)
+    ax.set_title("Odchylenie predykcji od pomiaru wg operacji", color=INK, fontsize=12, loc="left", pad=12)
+    fig.legend(handles=[Patch(facecolor=SIZE_COLORS[min(i, len(SIZE_COLORS) - 1)], label=f"{size_label(size)} transakcji")
+                        for i, size in enumerate(sizes)], frameon=False, fontsize=9, labelcolor=INK2, ncol=n, loc="lower center")
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    name = "prediction_by_operation.png"
+    fig.savefig(out / name, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return name
+
+
+def prediction_section(real_path, predicted_path, out):
+    """Markdown lines of the closing section, or [] when there is nothing to compare."""
+    pairs = comparison_pairs(real_path, predicted_path)
+    if not pairs:
+        return []
+    sizes = sorted({p["size"] for p in pairs})
+    calibration, tests = sizes[0], sizes[1:]
+    test_pairs = [p for p in pairs if p["size"] in tests]
+    dbs = [db for db in DATABASES if any(p["db"] == db for p in pairs)]
+    overall = deviation_stats(pairs)
+    md = ["## Hipoteza badawcza", "",
+          "> **Czy modele AI, dostając wyniki wydajności dla 100 000 rekordów, potrafią dobrze oszacować, "
+          "jak bazy zachowają się przy dużo większym obciążeniu?**", "",
+          "Powyższe porównania baz to prawdziwe pomiary. Badamy, czy model AI może je zastąpić albo przynajmniej "
+          "przewidzieć: dostaje wyniki z małego zbioru i ma zgadnąć, ile czasu zajmą te same 32 scenariusze na 1 mln "
+          "i 10 mln transakcji. Hipoteza zakłada, że model dobrze trafi w rzędy wielkości i ranking baz, ale pogubi się "
+          "tam, gdzie wydajność zależy od stanu danych, cache i planów zapytań, a nie tylko od ich ilości. "
+          "Czy tak wyszło, pokazuje porównanie poniżej.", ""]
+    md += ["## Predykcja AI a pomiar", "",
+          f"Porównanie `{predicted_path.name}` (wartości przewidziane przez model AI) z `{real_path.name}` (prawdziwe pomiary). "
+          "Dla każdej pary baza × scenariusz × rozmiar bierzemy medianę czasów z runów i liczymy odchylenie "
+          "(przewidziane − zmierzone) / zmierzone. „Mediana odchylenia” i „średnie odchylenie” to wartości bezwzględne; "
+          "„przesunięcie” ze znakiem pokazuje, czy model raczej zawyża (+) czy zaniża (−); „odchylenie sumy czasów” to różnica "
+          "łącznych czasów wszystkich porównanych scenariuszy.", ""]
+    if tests:
+        md += [f"Rozmiar {size_label(calibration)} posłużył do kalibracji predykcji, więc jego wynik nie jest testem. "
+               f"Prawdziwym testem są większe rozmiary ({', '.join(size_label(s) for s in tests)}), "
+               "na których model nie widział prawdziwych pomiarów.", ""]
+    md += [f"**Ogółem:** {overall['n']} porównanych pomiarów, średnie odchylenie {pct(overall['mean'])}, "
+           f"mediana {pct(overall['median'])}, odchylenie łącznego czasu {pct(overall['total'], True)}; "
+           f"{pct(overall['w25'])} pomiarów mieści się w ±25%, {pct(overall['x2'])} w granicach dwukrotnej różnicy.", ""]
+    if tests:
+        t = deviation_stats(test_pairs)
+        md += [f"**Tylko test ({', '.join(size_label(s) for s in tests)}):** {t['n']} pomiarów, średnie odchylenie "
+               f"{pct(t['mean'])}, mediana {pct(t['median'])}, odchylenie łącznego czasu {pct(t['total'], True)}; "
+               f"{pct(t['w25'])} w ±25%, {pct(t['x2'])} w granicach dwukrotnej różnicy.", ""]
+
+    groups = [("Wszystkie rozmiary", pairs)]
+    if tests:
+        groups.append(("Tylko test", test_pairs))
+    groups += [(f"{size_label(s)}" + (" (kalibracja)" if s == calibration and tests else ""),
+                [p for p in pairs if p["size"] == s]) for s in sizes]
+    md += ["### Podsumowanie wg rozmiaru", "", deviation_table("Zbiór", groups), ""]
+
+    basis = test_pairs if tests else pairs
+    basis_label = "tylko test" if tests else "wszystkie rozmiary"
+    md += [f"### Wg bazy ({basis_label})", "",
+           deviation_table("Baza", [(NAMES[db], [p for p in basis if p["db"] == db]) for db in dbs]), ""]
+    md += [f"### Wg operacji ({basis_label})", "",
+           deviation_table("Operacja", [(op, [p for p in basis if p["op"] == op]) for op in OPS]), ""]
+    md += [f"![predykcja wg operacji]({chart_prediction_by_operation(basis, tests or sizes, out)})", ""]
+
+    names = {s.id: s.name for s in SCENARIOS}
+    worst = sorted(basis, key=lambda p: -abs(math.log(p["pred"] / p["real"])))[:10]
+    md += [f"### Największe rozbieżności ({basis_label})", "",
+           md_table(["Scenariusz", "Baza", "Rozmiar", "Pomiar [s]", "Predykcja [s]", "Odchylenie"],
+                    [[f"{p['scenario']} {names[p['scenario']]}", NAMES[p["db"]], size_label(p["size"]), fmt(p["real"]),
+                      fmt(p["pred"]), pct(p["err"] * 100, True)] for p in worst]), "",
+           "Typowe źródła dużych odchyleń: inna liczba wierszy przetwarzanych przez scenariusz, stan danych po wcześniejszych "
+           "modyfikacjach (rozrost tabel, martwe wiersze), cache i plany zapytań przy większych danych oraz szum "
+           "przy czasach rzędu milisekund.", "",
+           f"![predykcja vs pomiar]({chart_prediction_scatter(basis, out)})", ""]
+    return md
+
+
 # ---------- report
 
-def build(csv_path, out):
+def build(csv_path, out, predicted_path=None):
     runs = load(csv_path)
     if not runs:
         raise SystemExit(f"{csv_path} has no results")
@@ -413,6 +596,9 @@ def build(csv_path, out):
     for db in dbs:
         md += [f"<details><summary>{NAMES[db]}</summary>", "", table_appendix(runs, db, sizes), "", "</details>", ""]
 
+    if predicted_path is not None and predicted_path.exists():
+        md += prediction_section(csv_path, predicted_path, out)
+
     path = out / "report.md"
     path.write_text("\n".join(md))
     return path
@@ -422,8 +608,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--predicted", type=Path, default=DEFAULT_PREDICTED,
+                        help="predicted values (same columns as runs.csv); skipped when the file does not exist")
     args = parser.parse_args()
-    print(f"wrote {build(args.csv, args.out)}")
+    print(f"wrote {build(args.csv, args.out, args.predicted)}")
 
 
 if __name__ == "__main__":
